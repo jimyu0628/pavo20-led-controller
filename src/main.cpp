@@ -27,7 +27,7 @@ static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
 
 // ---------- 非阻塞日志 ----------
-// 用 esp_usb_serial_jtag_write_bytes 直接写 USB 串口，timeout=0：
+// 用 usb_serial_jtag_write_bytes 直接写 USB 串口，timeout=0：
 // 主机没在读 / 发送缓冲满时立即返回丢弃数据，绝不阻塞 main 任务
 // （默认 printf 走 vfs 会阻塞在 USB-Serial-JTAG 上，曾导致任务看门狗超时）
 static void logMsg(const char* fmt, ...) {
@@ -36,7 +36,7 @@ static void logMsg(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    esp_usb_serial_jtag_write_bytes(buf, strlen(buf), 0);
+    usb_serial_jtag_write_bytes(buf, strlen(buf), 0);
 }
 
 // ---------- NVS 持久化（替代 Arduino Preferences） ----------
