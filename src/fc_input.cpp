@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 #include "driver/rmt_rx.h"
 
 // ---------- 共享接收缓冲（ISR 与主循环之间） ----------
@@ -15,6 +16,10 @@ static portMUX_TYPE s_rxLock = portMUX_INITIALIZER_UNLOCKED;
 static rmt_symbol_word_t s_rxBuffs[2][RMT_MEM_BLOCK];
 static volatile int s_rxBufIdx = 0;
 
+// 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
+static volatile uint32_t s_lastDoneUs = 0;   // 上次 RX done 时间(µs)
+static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
+
 static rmt_channel_handle_t s_rxCh = NULL;
 static rmt_receive_config_t s_rxRecvCfg;
 
@@ -23,6 +28,18 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
                                const rmt_rx_done_event_data_t* ed,
                                void* arg) {
     (void)ch; (void)arg;
+    uint32_t t = (uint32_t)esp_timer_get_time();
+
+    // 噪声风暴检测：两次 done 间隔 < 1ms（正常 Betaflight 帧间隔 10~20ms）
+    // 判定为噪声 → 丢弃数据、不再挂接接收，让 RMT 停下来，等待主循环恢复
+    if (t - s_lastDoneUs < 1000) {
+        s_rxStorm = true;
+        s_rxLastUs = 0;
+        s_rxAccLen = 0;
+        return false;
+    }
+    s_lastDoneUs = t;
+
     int n = (int)ed->num_symbols;
     if (n > 0) {
         if (s_rxAccLen + n <= RX_ACC_MAX) {
@@ -33,7 +50,7 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
         } else {
             s_rxAccLen = 0; // 溢出：丢弃从头再来
         }
-        s_rxLastUs = (uint32_t)esp_timer_get_time();
+        s_rxLastUs = t;
     }
     // 立即挂起下一轮接收（ping-pong 缓冲）
     s_rxBufIdx = 1 - s_rxBufIdx;
@@ -44,6 +61,17 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
 
 // ---------- 初始化 ----------
 void fcInputInit() {
+    // 先把输入引脚配为输入 + 上拉：
+    // 未接飞控时 GPIO4 悬空会被环境噪声触发 RMT RX 中断风暴（已实测导致任务看门狗超时），
+    // 上拉钳在高电平可消除噪声边沿；接飞控后飞控推挽输出不受内部上拉影响
+    gpio_config_t pinCfg = {};
+    pinCfg.pin_bit_mask = (1ULL << PIN_FC_IN);
+    pinCfg.mode = GPIO_MODE_INPUT;
+    pinCfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    pinCfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    pinCfg.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&pinCfg);
+
     rmt_rx_channel_config_t cfg = {};
     cfg.gpio_num = PIN_FC_IN;
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
@@ -66,7 +94,7 @@ void fcInputInit() {
 }
 
 // ---------- 解码：符号流 → GRB 灯色 ----------
-// 每个 symbol 对应 1 bit：高电平时长 >= 0.6µs(48 tick) 为 1，否则 0
+// 每个 symbol 对应 1 bit：高电平时长 >= 0.6µs(24 tick @40MHz) 为 1，否则 0
 // 24 bit = 1 颗灯，顺序 G-R-B（WS2812/Betaflight 原生顺序）
 static int decodeFrame(const rmt_symbol_word_t* sym, int n, RGB* out, int maxLeds) {
     uint8_t byte = 0;
@@ -100,6 +128,15 @@ static int decodeFrame(const rmt_symbol_word_t* sym, int n, RGB* out, int maxLed
 // 帧结束判定：距最后一次接收超过 4ms（单帧约 1ms，帧间隔约 10~20ms）
 bool pollFcInput(FcFrame* out) {
     static rmt_symbol_word_t s_local[RX_ACC_MAX]; // 主循环私有拷贝
+
+    // 若 ISR 因噪声风暴停止了接收，这里重新挂接（风暴被抑制，不会再风暴）
+    if (s_rxStorm) {
+        s_rxStorm = false;
+        s_lastDoneUs = 0;
+        rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
+                    RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+    }
+
     uint32_t nowUs = (uint32_t)esp_timer_get_time();
 
     uint16_t len = 0;
