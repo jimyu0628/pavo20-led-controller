@@ -7,9 +7,11 @@
 // ============================================================
 
 // ---------- 引脚定义（SuperMini 丝印） ----------
-#define PIN_FC_IN    4   // 飞控 LED 焊盘信号输入（RMT RX），3.3V 直连
-#define PIN_LED_OUT  3   // 灯带 DIN 数据输出（RMT TX）
-#define PIN_KEY      9   // 板载 BOOT 按键（按下为低电平），作为唯一按键
+// 使用 IDF 的 GPIO_NUM_x 枚举（gpio_num_t），适配 RMT/GPIO 驱动配置结构
+#include "driver/gpio.h"
+#define PIN_FC_IN    GPIO_NUM_4   // 飞控 LED 焊盘信号输入（RMT RX），3.3V 直连
+#define PIN_LED_OUT  GPIO_NUM_3   // 灯带 DIN 数据输出（RMT TX）
+#define PIN_KEY      GPIO_NUM_9   // 板载 BOOT 按键（按下为低电平），作为唯一按键
 
 // ---------- 灯带参数 ----------
 // 100 灯/米 × 55cm = 55 颗；此处为缓冲上限，实际长度以标定值为准
