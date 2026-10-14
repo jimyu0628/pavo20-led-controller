@@ -5,6 +5,8 @@
 #   2. 仓库 Actions 页会自动编译（也可以在 Actions 页点 "Run workflow" 手动触发）
 #   3. 编译完成后进入本次运行的页面，下载 "pavo20-led-firmware" 构件
 #      里面 merged.bin 是合并固件，用 ESP Web Flasher 网页直接刷入
+#   4. 排错：手动触发时可在 "Backtrace to decode" 输入框粘贴崩溃日志的
+#      Backtrace 地址行，本次运行会打印每个地址对应的函数名
 # ============================================================
 
 name: Build ESP32-C3 Firmware
@@ -13,6 +15,11 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch:   # 允许在 Actions 页面手动触发
+    inputs:
+      backtrace:
+        description: 'Backtrace addresses to decode, e.g. 0x4200172a:0x3fc962b0 0x42001924:0x3fc96350'
+        required: false
+        default: ''
 
 jobs:
   build:
@@ -54,6 +61,17 @@ jobs:
             0x8000 "$PART" \
             0x10000 .pio/build/esp32-c3/firmware.bin
 
+      # 手动触发时：把 Backtrace 里的地址解码成函数名（ESP32-C3 是 RISC-V）
+      - name: Decode backtrace (optional)
+        if: ${{ github.event.inputs.backtrace != '' }}
+        run: |
+          TOOL="$HOME/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-addr2line"
+          echo "Backtrace decode:"
+          for a in $(echo "${{ github.event.inputs.backtrace }}" | grep -oE '0x[0-9a-fA-F]+'); do
+            printf '%s -> ' "$a"
+            "$TOOL" -pfiaC -e .pio/build/esp32-c3/firmware.elf "$a"
+          done
+
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
@@ -61,4 +79,5 @@ jobs:
           path: |
             merged.bin
             .pio/build/esp32-c3/firmware.bin
+            .pio/build/esp32-c3/firmware.elf
           if-no-files-found: error

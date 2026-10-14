@@ -8,8 +8,10 @@
 // ============================================================
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include "esp_timer.h"
+#include "esp_usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -23,6 +25,19 @@
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+
+// ---------- 非阻塞日志 ----------
+// 用 esp_usb_serial_jtag_write_bytes 直接写 USB 串口，timeout=0：
+// 主机没在读 / 发送缓冲满时立即返回丢弃数据，绝不阻塞 main 任务
+// （默认 printf 走 vfs 会阻塞在 USB-Serial-JTAG 上，曾导致任务看门狗超时）
+static void logMsg(const char* fmt, ...) {
+    char buf[160];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    esp_usb_serial_jtag_write_bytes(buf, strlen(buf), 0);
+}
 
 // ---------- NVS 持久化（替代 Arduino Preferences） ----------
 static nvs_handle_t s_nvs;
@@ -147,7 +162,7 @@ static void enterCalibration() {
     s_calibrating = true;
     s_calCount = s_calibCount;
     updateCalibDisplay();
-    printf("[标定] 已进入。在 Betaflight LED 页设置红/蓝灯珠（红=2颗 蓝=4颗），长按 3s 退出保存。\n");
+    logMsg("[标定] 已进入。在 Betaflight LED 页设置红/蓝灯珠（红=2颗 蓝=4颗），长按 3s 退出保存。\n");
 }
 
 static void exitCalibration() {
@@ -155,7 +170,7 @@ static void exitCalibration() {
     s_calibCount = (s_calCount < 1) ? 1 : (s_calCount > CALIB_MAX ? CALIB_MAX : s_calCount);
     s_stripLen = (s_calibCount > STRIP_MAX_LEDS) ? STRIP_MAX_LEDS : s_calibCount;
     savePrefs();
-    printf("[标定] 退出。灯数=%d，比例=1:%d，Betaflight 侧应设 %d 颗。\n",
+    logMsg("[标定] 退出。灯数=%d，比例=1:%d，Betaflight 侧应设 %d 颗。\n",
            s_calibCount, currentRatio(),
            (s_calibCount + currentRatio() - 1) / currentRatio());
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
@@ -173,22 +188,22 @@ static void handleButton(ButtonEvent ev) {
             s_mode = (s_mode + 1) % MODE_COUNT;
             s_fxPhase = 0;
             savePrefs();
-            printf("[按键] 模式=%d\n", s_mode);
+            logMsg("[按键] 模式=%d\n", s_mode);
             break;
         case BTN_DOUBLE:
             s_colorIdx = (s_colorIdx + 1) % COLOR_COUNT;
             savePrefs();
-            printf("[按键] 颜色=%d\n", s_colorIdx);
+            logMsg("[按键] 颜色=%d\n", s_colorIdx);
             break;
         case BTN_TRIPLE:
             s_speedIdx = (s_speedIdx + 1) % SPEED_COUNT;
             savePrefs();
-            printf("[按键] 速度=%d\n", s_speedIdx);
+            logMsg("[按键] 速度=%d\n", s_speedIdx);
             break;
         case BTN_BRIGHT:
             s_brightIdx = (s_brightIdx + 1) % BRIGHT_COUNT;
             savePrefs();
-            printf("[按键] 亮度=%d%%\n",
+            logMsg("[按键] 亮度=%d%%\n",
                    (int)(BRIGHT_SCALE[s_brightIdx] * 100 / 255));
             break;
         case BTN_CAL:
@@ -215,8 +230,8 @@ extern "C" void app_main(void) {
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
     refreshStrip();
 
-    printf("=== 幻彩灯带控制板 (ESP32-C3 SuperMini) ===\n");
-    printf("灯数=%d 比例=1:%d 模式=%d 颜色=%d 速度=%d 亮度档=%d\n",
+    logMsg("=== 幻彩灯带控制板 (ESP32-C3 SuperMini) ===\n");
+    logMsg("灯数=%d 比例=1:%d 模式=%d 颜色=%d 速度=%d 亮度档=%d\n",
            s_calibCount, currentRatio(), s_mode, s_colorIdx, s_speedIdx, s_brightIdx);
 
     uint32_t lastBtnPoll = 0;
