@@ -1,0 +1,64 @@
+# ============================================================
+# 在线编译：GitHub Actions + PlatformIO（ESP-IDF 框架）
+# 用法：
+#   1. 把整个 pavo20-led-controller 文件夹推到 GitHub 仓库（默认分支 main 或 master）
+#   2. 仓库 Actions 页会自动编译（也可以在 Actions 页点 "Run workflow" 手动触发）
+#   3. 编译完成后进入本次运行的页面，下载 "pavo20-led-firmware" 构件
+#      里面 merged.bin 是合并固件，用 ESP Web Flasher 网页直接刷入
+# ============================================================
+
+name: Build ESP32-C3 Firmware
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:   # 允许在 Actions 页面手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install --quiet platformio
+
+      - name: Build firmware
+        run: pio run
+
+      - name: List build outputs
+        run: ls -laR .pio/build/esp32-c3 | head -80
+
+      - name: Install esptool
+        run: pip install --quiet esptool
+
+      # 合并 bootloader + 分区表 + 固件为单文件，方便网页刷机
+      # 分区布局（single factory）：0x0 bootloader / 0x8000 partitions / 0x10000 app
+      - name: Merge firmware
+        run: |
+          BOOT=".pio/build/esp32-c3/bootloader.bin"
+          [ -f "$BOOT" ] || BOOT=".pio/build/esp32-c3/bootloader/bootloader.bin"
+          PART=".pio/build/esp32-c3/partitions.bin"
+          [ -f "$PART" ] || PART=".pio/build/esp32-c3/partition_table/partition-table.bin"
+          echo "bootloader: $BOOT"
+          echo "partitions: $PART"
+          python -m esptool --chip esp32c3 merge_bin -o merged.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x0000 "$BOOT" \
+            0x8000 "$PART" \
+            0x10000 .pio/build/esp32-c3/firmware.bin
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pavo20-led-firmware
+          path: |
+            merged.bin
+            .pio/build/esp32-c3/firmware.bin
+          if-no-files-found: error

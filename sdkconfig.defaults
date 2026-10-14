@@ -1,0 +1,14 @@
+# ============================================================
+# ESP-IDF 工程配置（PlatformIO espidf 框架）
+# - 控制台/日志走 SuperMini 内置 USB-Serial-JTAG（插 USB 可见）
+# - 使用单分区表（factory app 在 0x10000），便于合并固件网页刷机
+# ============================================================
+
+# USB-Serial-JTAG 作为系统控制台（printf 输出到 USB）
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# 单 app 分区表（无 OTA）：0x0 bootloader / 0x8000 partitions / 0x10000 app
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+
+# 4MB flash（SuperMini）
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
