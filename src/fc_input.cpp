@@ -1,5 +1,7 @@
 #include "fc_input.h"
 #include <string.h>
+#include <stdio.h>
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_attr.h"
 #include "esp_timer.h"
@@ -84,7 +86,12 @@ void fcInputInit() {
     cfg.resolution_hz = RMT_RES_HZ;
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
     cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制
-    rmt_new_rx_channel(&cfg, &s_rxCh);
+    esp_err_t err = rmt_new_rx_channel(&cfg, &s_rxCh);
+    if (err != ESP_OK) {
+        // 初始化失败诊断：打印具体错误码
+        printf("[RX] rmt_new_rx_channel FAILED: %s (0x%x)\n", esp_err_to_name(err), err);
+        return;
+    }
 
     rmt_rx_event_callbacks_t cbs = {};
     cbs.on_recv_done = rxDoneCb;

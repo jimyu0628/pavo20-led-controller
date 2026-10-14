@@ -1,5 +1,7 @@
 #include "led_out.h"
 #include <string.h>
+#include <stdio.h>
+#include "esp_err.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 
@@ -42,7 +44,12 @@ void ledOutInit() {
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
     cfg.trans_queue_depth = 4;
     cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制
-    rmt_new_tx_channel(&cfg, &s_txCh);
+    esp_err_t err = rmt_new_tx_channel(&cfg, &s_txCh);
+    if (err != ESP_OK) {
+        // 初始化失败诊断：打印具体错误码（ESP_ERR_INVALID_ARG=0x102 等）
+        printf("[LED] rmt_new_tx_channel FAILED: %s (0x%x)\n", esp_err_to_name(err), err);
+        return;
+    }
 
     rmt_copy_encoder_config_t encCfg = {};
     rmt_new_copy_encoder(&encCfg, &s_copyEnc);
