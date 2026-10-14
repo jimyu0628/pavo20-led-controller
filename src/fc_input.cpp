@@ -19,6 +19,10 @@ static volatile int s_rxBufIdx = 0;
 // 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
 static volatile uint32_t s_lastDoneUs = 0;   // 上次 RX done 时间(µs)
 static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
+// 窗口计数判据：50ms 内 done 次数超限判风暴
+// （不能用"两次 done 间隔"判：正常飞控帧每 64 符号触发一次 done，间隔仅约 80µs）
+static volatile uint32_t s_doneWinUs = 0;    // 窗口开始时间
+static volatile uint32_t s_doneInWin = 0;    // 窗口内 done 计数
 
 static rmt_channel_handle_t s_rxCh = NULL;
 static rmt_receive_config_t s_rxRecvCfg;
@@ -30,9 +34,11 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
     (void)ch; (void)arg;
     uint32_t t = (uint32_t)esp_timer_get_time();
 
-    // 噪声风暴检测：两次 done 间隔 < 1ms（正常 Betaflight 帧间隔 10~20ms）
-    // 判定为噪声 → 丢弃数据、不再挂接接收，让 RMT 停下来，等待主循环恢复
-    if (t - s_lastDoneUs < 1000) {
+    // 噪声风暴检测（窗口计数）：
+    // 正常帧：50ms 内约 2~3 帧 × 12 段 ≈ 36 次 done；噪声风暴：远超 200 次
+    // 判定为风暴 → 丢弃数据、不再挂接接收，让 RMT 停下来，等待主循环恢复
+    if (t - s_doneWinUs > 50000) { s_doneWinUs = t; s_doneInWin = 0; }
+    if (++s_doneInWin > 200) {
         s_rxStorm = true;
         s_rxLastUs = 0;
         s_rxAccLen = 0;
@@ -132,7 +138,8 @@ bool pollFcInput(FcFrame* out) {
     // 若 ISR 因噪声风暴停止了接收，这里重新挂接（风暴被抑制，不会再风暴）
     if (s_rxStorm) {
         s_rxStorm = false;
-        s_lastDoneUs = 0;
+        s_doneWinUs = 0;
+        s_doneInWin = 0;
         rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
                     RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
     }
