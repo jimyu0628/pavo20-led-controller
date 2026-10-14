@@ -69,17 +69,6 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
 
 // ---------- 初始化 ----------
 void fcInputInit() {
-    // 先把输入引脚配为输入 + 上拉：
-    // 未接飞控时 GPIO4 悬空会被环境噪声触发 RMT RX 中断风暴（已实测导致任务看门狗超时），
-    // 上拉钳在高电平可消除噪声边沿；接飞控后飞控推挽输出不受内部上拉影响
-    gpio_config_t pinCfg = {};
-    pinCfg.pin_bit_mask = (1ULL << PIN_FC_IN);
-    pinCfg.mode = GPIO_MODE_INPUT;
-    pinCfg.pull_up_en = GPIO_PULLUP_ENABLE;
-    pinCfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    pinCfg.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&pinCfg);
-
     rmt_rx_channel_config_t cfg = {};
     cfg.gpio_num = PIN_FC_IN;
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
@@ -92,6 +81,11 @@ void fcInputInit() {
         printf("[RX] rmt_new_rx_channel FAILED: %s (0x%x)\n", esp_err_to_name(err), err);
         return;
     }
+
+    // 重要：RMT 通道创建会重配 GPIO（可能清除此前设置的上拉）。
+    // 未接飞控时 GPIO4 悬空、无上拉会被环境噪声触发 RX 中断风暴，
+    // 饿死 IDLE 任务导致任务看门狗超时——必须在通道创建后显式重新上拉。
+    gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
 
     rmt_rx_event_callbacks_t cbs = {};
     cbs.on_recv_done = rxDoneCb;
