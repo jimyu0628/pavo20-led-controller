@@ -231,6 +231,7 @@ extern "C" void app_main(void) {
     refreshStrip();
 
     logMsg("=== 幻彩灯带控制板 (ESP32-C3 SuperMini) ===\n");
+    logMsg("build: %s %s\n", __DATE__, __TIME__);
     logMsg("灯数=%d 比例=1:%d 模式=%d 颜色=%d 速度=%d 亮度档=%d\n",
            s_calibCount, currentRatio(), s_mode, s_colorIdx, s_speedIdx, s_brightIdx);
 
