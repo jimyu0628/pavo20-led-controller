@@ -59,5 +59,7 @@ void showStrip(const RGB* leds, int n) {
     rmt_tx_wait_all_done(s_txCh, 20); // 等上一帧发完，避免队列积压
     rmt_transmit_config_t tcfg = {};
     tcfg.loop_count = 0;
-    rmt_transmit(s_txCh, s_copyEnc, s_txSymbols, (size_t)len, &tcfg);
+    // 注意：payload_bytes 是字节数，不是符号数（copy 编码器按字节数解析符号数组）
+    rmt_transmit(s_txCh, s_copyEnc, s_txSymbols,
+                 (size_t)len * sizeof(rmt_symbol_word_t), &tcfg);
 }

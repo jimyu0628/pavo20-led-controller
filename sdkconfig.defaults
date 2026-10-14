@@ -7,6 +7,9 @@
 # USB-Serial-JTAG 作为系统控制台（printf 输出到 USB）
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# 开启帧指针：崩溃时输出完整 backtrace（便于定位问题）
+CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
+
 # 单 app 分区表（无 OTA）：0x0 bootloader / 0x8000 partitions / 0x10000 app
 CONFIG_PARTITION_TABLE_SINGLE_APP=y
 
