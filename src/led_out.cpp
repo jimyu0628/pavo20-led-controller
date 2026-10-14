@@ -37,7 +37,7 @@ static int encodeStripToSymbols(const RGB* leds, int n, rmt_symbol_word_t* sym) 
 void ledOutInit() {
     rmt_tx_channel_config_t cfg = {};
     cfg.gpio_num = PIN_LED_OUT;
-    cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+    cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
     cfg.trans_queue_depth = 4;

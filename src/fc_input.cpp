@@ -46,7 +46,7 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
 void fcInputInit() {
     rmt_rx_channel_config_t cfg = {};
     cfg.gpio_num = PIN_FC_IN;
-    cfg.clk_src = RMT_CLK_SRC_DEFAULT;
+    cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
     cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制

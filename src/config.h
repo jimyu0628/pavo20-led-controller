@@ -22,17 +22,20 @@
 #define FC_MAX_LEDS      32
 
 // ---------- RMT 时序（WS2812，800kHz） ----------
-#define RMT_RES_HZ       80000000ULL   // 80MHz，1 tick = 12.5ns
-#define RMT_MEM_BLOCK    64            // 每通道内存块符号数（默认 64）
-#define RX_ACC_MAX       896           // 累积缓冲：32颗×24bit=768 + 余量
-#define TICK_HI_THRESHOLD  48          // 高电平 ≥ 0.6µs(48 tick) 判为 bit1
+// ESP32-C3 的 RMT 可靠时钟源为 40MHz XTAL（不支持 80MHz 分辨率）
+// 40MHz：1 tick = 25ns；以下时序按 40MHz 换算，实际时序与 80MHz 版一致
+#define RMT_CLK_SRC      RMT_CLK_SRC_XTAL  // 40MHz 晶振，C3 必选可用
+#define RMT_RES_HZ       40000000ULL       // 40MHz，1 tick = 25ns
+#define RMT_MEM_BLOCK    64                // 每通道内存块符号数（默认 64）
+#define RX_ACC_MAX       896               // 累积缓冲：32颗×24bit=768 + 余量
+#define TICK_HI_THRESHOLD  24              // 高电平 ≥ 0.6µs(24 tick) 判为 bit1
 
-// 编码参数（单位：tick @80MHz）
-#define T1H_TICKS  64    // bit1 高 800ns
-#define T1L_TICKS  36    // bit1 低 450ns
-#define T0H_TICKS  32    // bit0 高 400ns
-#define T0L_TICKS  68    // bit0 低 850ns
-#define RESET_TICKS 6400 // 复位 80µs
+// 编码参数（单位：tick @40MHz）
+#define T1H_TICKS  32    // bit1 高 800ns
+#define T1L_TICKS  18    // bit1 低 450ns
+#define T0H_TICKS  16    // bit0 高 400ns
+#define T0L_TICKS  34    // bit0 低 850ns
+#define RESET_TICKS 3200 // 复位 80µs
 
 // ---------- 时序逻辑 ----------
 #define FC_TIMEOUT_MS    500   // Betaflight 模式：无信号超时后灯带熄灭
