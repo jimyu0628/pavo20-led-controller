@@ -11,7 +11,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include "esp_timer.h"
-#include "esp_usb_serial_jtag.h"
+#include "esp_driver_usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
