@@ -25,8 +25,8 @@ static rmt_symbol_word_t s_rxBuffs[2][RMT_MEM_BLOCK];
 static volatile int s_rxBufIdx = 0;
 
 // 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
-static volatile uint32_t s_lastDoneUs = 0;   // 上次 RX done 时间(µs)
 static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
+static volatile uint32_t s_stormAtUs = 0;    // 风暴发生时间（重新挂接前冷却的起点）
 // 窗口计数判据：50ms 内 done 次数超限判风暴
 // （不能用"两次 done 间隔"判：正常飞控帧每 64 符号触发一次 done，间隔仅约 80µs）
 static volatile uint32_t s_doneWinUs = 0;    // 窗口开始时间
@@ -48,11 +48,11 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
     if (t - s_doneWinUs > 50000) { s_doneWinUs = t; s_doneInWin = 0; }
     if (++s_doneInWin > 200) {
         s_rxStorm = true;
+        s_stormAtUs = t;   // 记录风暴时刻（供主循环冷却后重新挂接）
         s_rxLastUs = 0;
         s_rxAccLen = 0;
         return false;
     }
-    s_lastDoneUs = t;
 
     int n = (int)ed->num_symbols;
     if (n > 0) {
@@ -95,9 +95,9 @@ void fcInputInit() {
 
     // 重要：RMT 通道创建会重配 GPIO（可能清除此前设置的上拉）。
     // 未接飞控时 GPIO4 悬空、无上拉会被环境噪声触发 RX 中断风暴，
-    // 饿死 IDLE 任务导致任务看门狗超时——必须在通道创建后显式重新上拉。
-    gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
-
+    // 饿死 IDLE 任务导致任务看门狗超时。
+    // 因此上拉必须在【全部 RMT 初始化完成之后】最后再设置一次：
+    // 通道创建 / enable / receive 都可能重置 GPIO 配置。
     rmt_rx_event_callbacks_t cbs = {};
     cbs.on_recv_done = rxDoneCb;
     rmt_rx_register_event_callbacks(s_rxCh, &cbs, NULL);
@@ -109,6 +109,9 @@ void fcInputInit() {
     s_rxRecvCfg.signal_range_max_ns = RX_SIGNAL_MAX_NS;
     rmt_receive(s_rxCh, (void*)s_rxBuffs[0],
                 RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+
+    // 最后再确保一次上拉（GPIO 配置以此次为准）
+    gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
 }
 
 // ---------- 解码：符号流 → GRB 灯色 ----------
@@ -151,13 +154,18 @@ bool pollFcInput(FcFrame* out) {
 #endif
     static rmt_symbol_word_t s_local[RX_ACC_MAX]; // 主循环私有拷贝
 
-    // 若 ISR 因噪声风暴停止了接收，这里重新挂接（风暴被抑制，不会再风暴）
+    // 若 ISR 因噪声风暴停止了接收，冷却 500ms 后再重新挂接：
+    // 避免"挂接→立即风暴→又挂接"的循环持续占用 CPU、饿死 IDLE。
+    // 即使 GPIO4 持续有噪声，也只会每 500ms 产生一波短风暴（≤50ms），系统不卡死。
     if (s_rxStorm) {
-        s_rxStorm = false;
-        s_doneWinUs = 0;
-        s_doneInWin = 0;
-        rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
-                    RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+        uint32_t nowUs2 = (uint32_t)esp_timer_get_time();
+        if (nowUs2 - s_stormAtUs > 500000) {
+            s_rxStorm = false;
+            s_doneWinUs = 0;
+            s_doneInWin = 0;
+            rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
+                        RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+        }
     }
 
     uint32_t nowUs = (uint32_t)esp_timer_get_time();
