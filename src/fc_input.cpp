@@ -8,6 +8,12 @@
 #include "driver/gpio.h"
 #include "driver/rmt_rx.h"
 
+// 诊断开关：0 = 完全禁用 RMT RX（不开通道、不接收）
+// 用于二分定位"中断风暴饿死 IDLE"的风暴源是否来自飞控输入 RX
+#ifndef FC_INPUT_ENABLE
+#define FC_INPUT_ENABLE 1
+#endif
+
 // ---------- 共享接收缓冲（ISR 与主循环之间） ----------
 static rmt_symbol_word_t s_rxAcc[RX_ACC_MAX];      // 累积的原始符号
 static volatile uint16_t s_rxAccLen = 0;           // 已累积符号数
@@ -69,6 +75,11 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
 
 // ---------- 初始化 ----------
 void fcInputInit() {
+#if FC_INPUT_ENABLE == 0
+    // 诊断模式：RX 完全禁用
+    printf("[RX] DISABLED (FC_INPUT_ENABLE=0)\n");
+    return;
+#endif
     rmt_rx_channel_config_t cfg = {};
     cfg.gpio_num = PIN_FC_IN;
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
@@ -134,6 +145,10 @@ static int decodeFrame(const rmt_symbol_word_t* sym, int n, RGB* out, int maxLed
 // ---------- 轮询：取完整帧 ----------
 // 帧结束判定：距最后一次接收超过 4ms（单帧约 1ms，帧间隔约 10~20ms）
 bool pollFcInput(FcFrame* out) {
+#if FC_INPUT_ENABLE == 0
+    (void)out;
+    return false;
+#endif
     static rmt_symbol_word_t s_local[RX_ACC_MAX]; // 主循环私有拷贝
 
     // 若 ISR 因噪声风暴停止了接收，这里重新挂接（风暴被抑制，不会再风暴）
