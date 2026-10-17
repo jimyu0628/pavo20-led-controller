@@ -24,7 +24,14 @@
 #include "button.h"
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
-static void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+static void delayMs(uint32_t ms) {
+    // 关键：FreeRTOS tick 默认 100Hz（10ms/tick），pdMS_TO_TICKS(1) 会算出 0，
+    // vTaskDelay(0) = yield（不睡眠）→ 主循环忙转占满 CPU → IDLE 饿死 → 任务看门狗超时！
+    // 因此不足 1 tick 的延迟必须至少让出 1 tick（10ms），主循环才能真正睡眠。
+    TickType_t ticks = pdMS_TO_TICKS(ms);
+    if (ticks == 0) ticks = 1;
+    vTaskDelay(ticks);
+}
 // ---------- 日志 ----------
 // 用 printf 走系统 console（USB-Serial-JTAG vfs）：
 //  - 开机即可正常输出（裸 usb_serial_jtag_write_bytes 在驱动未初始化时输出会丢失，
