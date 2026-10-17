@@ -13,7 +13,6 @@
 #include <stdarg.h>
 #include <string.h>
 #include "esp_timer.h"
-#include "driver/usb_serial_jtag.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -26,17 +25,19 @@
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
-// ---------- 非阻塞日志 ----------
-// 用 usb_serial_jtag_write_bytes 直接写 USB 串口，timeout=0：
-// 主机没在读 / 发送缓冲满时立即返回丢弃数据，绝不阻塞 main 任务
-// （默认 printf 走 vfs 会阻塞在 USB-Serial-JTAG 上，曾导致任务看门狗超时）
+// ---------- 日志 ----------
+// 用 printf 走系统 console（USB-Serial-JTAG vfs）：
+//  - 开机即可正常输出（裸 usb_serial_jtag_write_bytes 在驱动未初始化时输出会丢失，
+//    导致 build 行与 [LED]/[RX] FAILED 错误码全看不到）
+//  - 只用于启动/按键/标定等低频消息；经实测 printf 不会阻塞主任务
+//    （此前任务看门狗超时真凶是 GPIO4 悬空导致的 RMT RX 中断风暴，已修复）
 static void logMsg(const char* fmt, ...) {
     char buf[160];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    usb_serial_jtag_write_bytes(buf, strlen(buf), 0);
+    printf("%s", buf);
 }
 // ---------- NVS 持久化（替代 Arduino Preferences） ----------
 static nvs_handle_t s_nvs;
