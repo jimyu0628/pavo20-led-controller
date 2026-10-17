@@ -28,9 +28,11 @@ static int encodeStripToSymbols(const RGB* leds, int n, rmt_symbol_word_t* sym) 
             }
         }
     }
-    // 帧复位脉冲（低电平 80µs）
-    sym[idx].duration0 = 0;   sym[idx].level0 = 0;
-    sym[idx].duration1 = RESET_TICKS; sym[idx].level1 = 0;
+    // 帧复位脉冲（低电平 80µs）。
+    // 注意：RMT copy 编码器不接受 duration=0 的符号（会返回 invalid argument，
+    // 且旧代码没检查返回值导致灯带从未收到有效信号）——duration0 必须 >= 1。
+    sym[idx].duration0 = 1;          sym[idx].level0 = 0;
+    sym[idx].duration1 = RESET_TICKS - 1; sym[idx].level1 = 0;
     idx++;
     return idx;
 }
@@ -73,6 +75,11 @@ void showStrip(const RGB* leds, int n) {
     rmt_transmit_config_t tcfg = {};
     tcfg.loop_count = 0;
     // 注意：payload_bytes 是字节数，不是符号数（copy 编码器按字节数解析符号数组）
-    rmt_transmit(s_txCh, s_copyEnc, s_txSymbols,
-                 (size_t)len * sizeof(rmt_symbol_word_t), &tcfg);
+    esp_err_t e = rmt_transmit(s_txCh, s_copyEnc, s_txSymbols,
+                               (size_t)len * sizeof(rmt_symbol_word_t), &tcfg);
+    if (e != ESP_OK) {
+        // 发送失败诊断：错误码 + 本帧符号数
+        printf("[LED] rmt_transmit err %s (0x%x) syms=%d\n",
+               esp_err_to_name(e), e, len);
+    }
 }
