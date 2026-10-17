@@ -52,13 +52,19 @@ void ledOutInit() {
     }
 
     rmt_copy_encoder_config_t encCfg = {};
-    rmt_new_copy_encoder(&encCfg, &s_copyEnc);
+    esp_err_t err2 = rmt_new_copy_encoder(&encCfg, &s_copyEnc);
+    if (err2 != ESP_OK) {
+        // 初始化失败诊断：打印具体错误码
+        printf("[LED] rmt_new_copy_encoder FAILED: %s (0x%x)\n", esp_err_to_name(err2), err2);
+        return;
+    }
 
     rmt_enable(s_txCh);
 }
 
 // ---------- 发送一帧 ----------
 void showStrip(const RGB* leds, int n) {
+    if (s_txCh == NULL || s_copyEnc == NULL) return; // 通道/编码器未就绪：跳过，避免报错刷屏
     if (n <= 0) n = 1;
     if (n > STRIP_MAX_LEDS) n = STRIP_MAX_LEDS;
     int len = encodeStripToSymbols(leds, n, s_txSymbols);
