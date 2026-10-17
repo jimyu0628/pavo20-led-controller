@@ -211,20 +211,29 @@ extern "C" void app_main(void) {
     buttonInit();
     ledOutInit();
     fcInputInit();
-    // 开机自检：白灯闪 250ms
+    // 开机自检：白灯闪 1s（肉眼确认灯带与信号链路；不经过亮度缩放，应是纯白）
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(255, 255, 255);
     refreshStrip();
-    delayMs(250);
+    delayMs(1000);
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
     refreshStrip();
-    logMsg("=== 幻彩灯带控制板 (ESP32-C3 SuperMini) ===\n");
+    logMsg("=== 幻彩灯带控制板 (ESP32-C3 SuperMini) v4 ===\n");
     logMsg("build: %s %s\n", __DATE__, __TIME__);
     logMsg("灯数=%d 比例=1:%d 模式=%d 颜色=%d 速度=%d 亮度档=%d\n",
            s_calibCount, currentRatio(), s_mode, s_colorIdx, s_speedIdx, s_brightIdx);
     uint32_t lastBtnPoll = 0;
+    uint32_t lastHbMs = 0;
+    uint32_t lastTxTotal = 0;
     FcFrame frame;
     while (1) {
         uint32_t now = nowMs();
+        // 0) 发送心跳：每秒打印一次已发送帧数（确认 RMT TX 确实在持续发送）
+        if (now - lastHbMs >= 1000) {
+            lastHbMs = now;
+            uint32_t cur = (uint32_t)g_txCount;
+            logMsg("[LED] tx=%u/s\n", cur - lastTxTotal);
+            lastTxTotal = cur;
+        }
         // 1) 按键（每 5ms）
         if (now - lastBtnPoll >= 5) {
             lastBtnPoll = now;

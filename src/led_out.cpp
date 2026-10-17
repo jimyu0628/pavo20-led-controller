@@ -9,6 +9,8 @@ static rmt_channel_handle_t s_txCh = NULL;
 static rmt_encoder_handle_t s_copyEnc = NULL;
 static rmt_symbol_word_t s_txSymbols[STRIP_MAX_LEDS * 24 + 1];
 
+volatile uint32_t g_txCount = 0; // 成功发送帧计数（心跳诊断）
+
 // ---------- 编码：RGB 数组 → WS2812 符号流（GRB，MSB first） ----------
 static int encodeStripToSymbols(const RGB* leds, int n, rmt_symbol_word_t* sym) {
     int idx = 0;
@@ -81,5 +83,7 @@ void showStrip(const RGB* leds, int n) {
         // 发送失败诊断：错误码 + 本帧符号数
         printf("[LED] rmt_transmit err %s (0x%x) syms=%d\n",
                esp_err_to_name(e), e, len);
+    } else {
+        g_txCount++;
     }
 }

@@ -12,3 +12,6 @@ void ledOutInit();
 
 // 把 leds 前 n 颗编码为 WS2812 符号并发送（GRB 顺序）
 void showStrip(const RGB* leds, int n);
+
+// 已成功发送的帧计数（主循环每秒读一次打印心跳，用于确认信号确实在发）
+extern volatile uint32_t g_txCount;
