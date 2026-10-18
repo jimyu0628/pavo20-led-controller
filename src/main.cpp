@@ -98,18 +98,19 @@ static void loadPrefs() {
     s_mode       = DEFAULT_MODE;
     s_colorIdx   = nvsGetU8("color", 0);
     s_speedIdx   = nvsGetU8("speed", 1);
-    s_brightIdx  = nvsGetU8("bright", 0);
+    // 默认亮度 50%（档位 2 = 128/255）；键名 bright1 确保此版首次上电即 50%
+    s_brightIdx  = nvsGetU8("bright1", 2);
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
     if (s_speedIdx < 0 || s_speedIdx >= SPEED_COUNT) s_speedIdx = 1;
-    if (s_brightIdx < 0 || s_brightIdx >= BRIGHT_COUNT) s_brightIdx = 0;
+    if (s_brightIdx < 0 || s_brightIdx >= BRIGHT_COUNT) s_brightIdx = 2;
     if (s_calibCount < 1 || s_calibCount > CALIB_MAX) s_calibCount = STRIP_DEFAULT_LEDS;
     s_stripLen = (s_calibCount > STRIP_MAX_LEDS) ? STRIP_MAX_LEDS : s_calibCount;
 }
 static void savePrefs() {
     nvsPutU8("color", (uint8_t)s_colorIdx);
     nvsPutU8("speed", (uint8_t)s_speedIdx);
-    nvsPutU8("bright", (uint8_t)s_brightIdx);
+    nvsPutU8("bright1", (uint8_t)s_brightIdx);
     nvsPutU16("calib", (uint16_t)s_calibCount);
 }
 // ---------- 显示 ----------
@@ -219,7 +220,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v8 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v9 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,

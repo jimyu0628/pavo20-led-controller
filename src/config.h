@@ -28,10 +28,11 @@
 #define RMT_CLK_SRC      RMT_CLK_SRC_XTAL  // 40MHz 晶振，C3 必选可用
 #define RMT_RES_HZ       40000000ULL       // 40MHz，1 tick = 25ns
 #define RMT_MEM_BLOCK    64                // 每通道内存块符号数（默认 64）
-// 飞控 RX 接收缓冲：无 DMA 时每次 receive 最多收 mem_block 大小，
-// 调大到 256（C3 每通道最多 4 块）可减少中断续接次数，防止长帧丢段。
-// C3 RMT 总内存 512 符号：RX 256 + TX 64 = 320，够用。
-#define RX_MEM_BLOCK_SYMBOLS 256
+// 飞控 RX 接收缓冲：无 DMA 时每次 receive 最多收 mem_block 大小。
+// 注意：ESP32-C3 每通道 RMT 内存上限 192 符号（3 块），RX 256 会超限导致
+// rmt_new_rx_channel 失败（ESP_ERR_NOT_FOUND 0x105）→ 用 128（2 块）。
+// 128 符号=一次收 5 颗灯，28 颗一帧约 6 次中断续接，可接受。
+#define RX_MEM_BLOCK_SYMBOLS 128
 #define RX_ACC_MAX       896               // 累积缓冲：32颗×24bit=768 + 余量
 #define TICK_HI_THRESHOLD  24              // 高电平 ≥ 0.6µs(24 tick) 判为 bit1
 // 编码参数（单位：tick @40MHz）
