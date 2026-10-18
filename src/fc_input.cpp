@@ -51,6 +51,8 @@ volatile uint32_t g_rxLastLeds = 0;
 volatile uint32_t g_rxDone = 0;      // 软件解码：帧头中断次数
 volatile uint32_t g_rxSyms = 0;      // 软件解码：累计 bit 数
 volatile uint32_t g_rxDrop = 0;      // 软件解码：帧头不可靠丢弃帧数
+volatile uint32_t g_rxFrameEnd = 0;  // 软件解码：ISR 置"帧完成"次数
+volatile uint32_t g_rxLedAtEnd = 0;  // 软件解码：最近一次帧完成时的灯数
 static esp_err_t s_rxErr = ESP_OK;
 static bool s_rxSwInit = false;
 
@@ -78,7 +80,19 @@ static inline void IRAM_ATTR swPushBit(bool one) {
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
 static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
-    // 新帧开始：清累积
+
+    // 第一段：忙等变低（当前 bit 的高电平结束）。
+    // 带超时：若 20µs 内电平不变低 = 帧间空闲高电平 / 上一帧忙等期间锁存的
+    // 边沿误触发 → 直接返回【不清任何状态】，避免把上一帧刚置的 frameDone
+    // 清掉导致主循环永远取不到帧（frames=0 的根因之一）。
+    uint32_t a0 = esp_cpu_get_cycle_count();
+    while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
+        if ((esp_cpu_get_cycle_count() - a0) > FC_RESET_TIMEOUT_CYC) {
+            return;
+        }
+    }
+
+    // 确认是真新帧：清累积
     s_swBits = 0;
     s_swBitCnt = 0;
     s_swLedCnt = 0;
@@ -105,6 +119,8 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
             if ((esp_cpu_get_cycle_count() - w0) > FC_RESET_TIMEOUT_CYC) {
                 s_swFrameDone = true;
+                g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
+                g_rxLedAtEnd = (uint32_t)s_swLedCnt;
                 return;   // 帧尾 reset（低电平超时）
             }
         }
@@ -112,6 +128,8 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
             if ((esp_cpu_get_cycle_count() - h0) > FC_RESET_TIMEOUT_CYC) {
                 s_swFrameDone = true;
+                g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
+                g_rxLedAtEnd = (uint32_t)s_swLedCnt;
                 return;   // 帧间空闲高电平超时（防卡死在等待变低）
             }
         }

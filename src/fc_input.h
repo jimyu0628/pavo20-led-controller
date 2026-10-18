@@ -30,5 +30,7 @@ extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数
 extern volatile uint32_t g_rxDone;     // 帧头中断次数
 extern volatile uint32_t g_rxSyms;     // 累计解码 bit 数
 extern volatile uint32_t g_rxDrop;     // 帧头不可靠丢弃帧数
+extern volatile uint32_t g_rxFrameEnd; // ISR 置"帧完成"次数
+extern volatile uint32_t g_rxLedAtEnd; // 最近一次帧完成时的灯数
 bool fcRxOk();    // 软件解码是否初始化成功
 int  fcRxErr();   // 初始化失败错误码（0 = 无错误）
