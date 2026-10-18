@@ -69,7 +69,7 @@ static inline void IRAM_ATTR swPushBit(bool one) {
         s_swBits = 0;
         s_swBitCnt = 0;
     }
-    s_rxSyms = (uint32_t)(s_rxSyms + 1);
+    g_rxSyms = (uint32_t)(g_rxSyms + 1);
 }
 
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
@@ -151,7 +151,12 @@ bool pollFcInput(FcFrame* out) {
     portENTER_CRITICAL(&s_rxLock);
     int n = (int)s_swLedCnt;
     if (n > FC_MAX_LEDS) n = FC_MAX_LEDS;
-    for (int i = 0; i < n; i++) out->leds[i] = s_swLeds[i];
+    for (int i = 0; i < n; i++) {
+        // volatile 结构体不能整体赋值，逐字段拷贝
+        out->leds[i].g = s_swLeds[i].g;
+        out->leds[i].r = s_swLeds[i].r;
+        out->leds[i].b = s_swLeds[i].b;
+    }
     s_swFrameDone = false;
     portEXIT_CRITICAL(&s_rxLock);
 
