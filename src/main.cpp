@@ -218,23 +218,25 @@ extern "C" void app_main(void) {
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
-    // 单行 + \n 一次性输出，版本/灯数/初始化状态全部可见
-    logMsg("=== 幻彩灯带控制板 v5 | 灯数=%d 比例=1:%d 模式=%d | LED init=%s(0x%x) ===\n",
-           s_calibCount, currentRatio(), s_mode,
+    // 单行 + \n 一次性输出，版本/灯数/模式全部可见
+    logMsg("=== 幻彩灯带控制板 v6 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+           s_calibCount, currentRatio(), s_mode);
+    logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
+           __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
            ledOutOk() ? "OK" : "FAIL", (unsigned)ledOutErr());
-    logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d\n",
-           __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx);
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
     uint32_t lastTxTotal = 0;
     FcFrame frame;
     while (1) {
         uint32_t now = nowMs();
-        // 0) 发送心跳：每秒打印一次已发送帧数（确认 RMT TX 确实在持续发送）
+        // 0) 发送心跳：每秒打印一次已发送帧数 + TX 初始化状态/错误码
+        //    （错误码每秒重复打印，避免开机日志被截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
             uint32_t cur = (uint32_t)g_txCount;
-            logMsg("[LED] tx=%u/s\n", cur - lastTxTotal);
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x\n", cur - lastTxTotal,
+                   ledOutOk() ? 1 : 0, (unsigned)ledOutErr());
             lastTxTotal = cur;
         }
         // 1) 按键（每 5ms）
