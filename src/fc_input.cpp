@@ -31,7 +31,10 @@
 #define FC_HI_1_CYC    128            // bit1 高 800ns
 #define FC_HI_0_CYC    64             // bit0 高 400ns
 #define FC_BIT_THRESHOLD_CYC 96       // 判别阈值 600ns
-#define FC_RESET_TIMEOUT_CYC 9000     // 低电平超时 56µs → 帧尾 reset
+// 帧尾判定超时 20µs（3200 cycle @160MHz）：
+// WS2812 bit 间电平最长 850ns，而帧尾 reset 低电平 ≥ 50µs、帧间空闲为 10~20ms，
+// 20µs 可明确区分。实测 Betaflight reset 约 50µs，56µs 阈值会漏判导致帧永不结束。
+#define FC_RESET_TIMEOUT_CYC 3200
 #define FC_BIT_MIN_CYC  32            // 首个 bit 高时长下限（200ns）：低于此视为帧头不可靠，弃帧
 
 // ---------- ISR 与主循环共享 ----------
@@ -41,13 +44,13 @@ static volatile uint8_t  s_swBitCnt = 0;
 static volatile RGB      s_swLeds[FC_MAX_LEDS];
 static volatile int      s_swLedCnt = 0;
 static volatile bool     s_swFrameDone = false;
-static volatile bool     s_swDropped = false; // 帧头不可靠丢弃计数用（诊断）
 
 // 诊断统计
 volatile uint32_t g_rxFrames = 0;
 volatile uint32_t g_rxLastLeds = 0;
 volatile uint32_t g_rxDone = 0;      // 软件解码：帧头中断次数
 volatile uint32_t g_rxSyms = 0;      // 软件解码：累计 bit 数
+volatile uint32_t g_rxDrop = 0;      // 软件解码：帧头不可靠丢弃帧数
 static esp_err_t s_rxErr = ESP_OK;
 static bool s_rxSwInit = false;
 
@@ -90,22 +93,28 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     uint32_t t1 = esp_cpu_get_cycle_count();
     uint32_t firstHi = t1 - t0;
     if (firstHi < FC_BIT_MIN_CYC) {
-        s_swDropped = true;
-        return;   // 帧头没测到 → 丢本帧
+        g_rxDrop = (uint32_t)(g_rxDrop + 1); // 帧头不可靠：弃帧，等下一帧重新同步
+        return;
     }
     swPushBit(firstHi > FC_BIT_THRESHOLD_CYC);
 
-    // 连续测量后续 bit：忙等"变高→变低"交替；变高等超时 = 帧尾 reset
+    // 连续测量后续 bit：忙等"变高→变低"交替；
+    // 低电平超时（帧尾 reset）或高电平超时（帧间空闲）都判定帧结束
     while (1) {
         uint32_t w0 = esp_cpu_get_cycle_count();
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
             if ((esp_cpu_get_cycle_count() - w0) > FC_RESET_TIMEOUT_CYC) {
                 s_swFrameDone = true;
-                return;   // 帧尾
+                return;   // 帧尾 reset（低电平超时）
             }
         }
         uint32_t h0 = esp_cpu_get_cycle_count();
-        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) { }
+        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
+            if ((esp_cpu_get_cycle_count() - h0) > FC_RESET_TIMEOUT_CYC) {
+                s_swFrameDone = true;
+                return;   // 帧间空闲高电平超时（防卡死在等待变低）
+            }
+        }
         uint32_t h1 = esp_cpu_get_cycle_count();
         swPushBit((h1 - h0) > FC_BIT_THRESHOLD_CYC);
     }
