@@ -27,6 +27,8 @@ static volatile int s_rxBufIdx = 0;
 // 诊断统计
 volatile uint32_t g_rxFrames = 0;
 volatile uint32_t g_rxLastLeds = 0;
+volatile uint32_t g_rxDone = 0;   // RMT RX done 回调累计次数（是否收到任何数据）
+volatile uint32_t g_rxSyms = 0;   // 累计接收符号数
 
 // 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
 static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
@@ -38,6 +40,10 @@ static volatile uint32_t s_doneInWin = 0;    // 窗口内 done 计数
 
 static rmt_channel_handle_t s_rxCh = NULL;
 static rmt_receive_config_t s_rxRecvCfg;
+static esp_err_t s_rxErr = ESP_OK; // RX 初始化失败错误码（延迟到 USB 就绪后打印）
+
+bool fcRxOk() { return s_rxCh != NULL; }
+int  fcRxErr() { return (int)s_rxErr; }
 
 // ---------- RMT 接收完成回调（ISR 上下文） ----------
 static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
@@ -59,7 +65,9 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
     }
 
     int n = (int)ed->num_symbols;
+    g_rxDone++;                 // 诊断：done 次数
     if (n > 0) {
+        g_rxSyms += (uint32_t)n; // 诊断：累计符号
         if (s_rxAccLen + n <= RX_ACC_MAX) {
             const rmt_symbol_word_t* src = ed->received_symbols;
             uint16_t base = s_rxAccLen;
@@ -94,8 +102,7 @@ void fcInputInit() {
     // cfg.flags.with_dma = false;（默认即 false，不设置）
     esp_err_t err = rmt_new_rx_channel(&cfg, &s_rxCh);
     if (err != ESP_OK) {
-        // 初始化失败诊断：打印具体错误码
-        printf("[RX] rmt_new_rx_channel FAILED: %s (0x%x)\n", esp_err_to_name(err), err);
+        s_rxErr = err; // 记录错误码，USB 就绪后由 main 打印
         return;
     }
 

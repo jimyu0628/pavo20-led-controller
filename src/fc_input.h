@@ -26,3 +26,7 @@ bool pollFcInput(FcFrame* out);
 // 诊断统计（主循环心跳打印用）
 extern volatile uint32_t g_rxFrames;   // 累计成功解码的飞控帧数
 extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数
+extern volatile uint32_t g_rxDone;     // RMT RX done 次数（是否收到任何数据）
+extern volatile uint32_t g_rxSyms;     // 累计接收符号数
+bool fcRxOk();    // RX 通道是否创建成功
+int  fcRxErr();   // RX 初始化失败错误码（0 = 无错误）

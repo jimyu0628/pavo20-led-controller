@@ -219,7 +219,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v7 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v8 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
@@ -230,13 +230,14 @@ extern "C" void app_main(void) {
     FcFrame frame;
     while (1) {
         uint32_t now = nowMs();
-        // 0) 发送心跳：每秒打印一次 TX 帧数 + TX 初始化状态 + RX 解码统计
-        //    （错误码每秒重复打印，避免开机日志被截断丢失）
+        // 0) 发送心跳：每秒打印 TX/RX 状态与统计（错误码每秒重复，防截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
             uint32_t cur = (uint32_t)g_txCount;
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [RX] frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [RX] ok=%d err=0x%x done=%u syms=%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
+                   fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
+                   (uint32_t)g_rxDone, (uint32_t)g_rxSyms,
                    (uint32_t)g_rxFrames, (uint32_t)g_rxLastLeds);
             lastTxTotal = cur;
         }
