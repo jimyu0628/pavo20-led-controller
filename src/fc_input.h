@@ -22,3 +22,7 @@ void fcInputInit();
 
 // 轮询：若有完整新帧则解码并返回 true（out 写入解码结果）
 bool pollFcInput(FcFrame* out);
+
+// 诊断统计（主循环心跳打印用）
+extern volatile uint32_t g_rxFrames;   // 累计成功解码的飞控帧数
+extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数

@@ -21,8 +21,12 @@ static volatile uint32_t s_rxLastUs = 0;           // 最后一次接收时间(�
 static portMUX_TYPE s_rxLock = portMUX_INITIALIZER_UNLOCKED;
 
 // 双缓冲交替接收（保持 buffer 在接收期间有效）
-static rmt_symbol_word_t s_rxBuffs[2][RMT_MEM_BLOCK];
+static rmt_symbol_word_t s_rxBuffs[2][RX_MEM_BLOCK_SYMBOLS];
 static volatile int s_rxBufIdx = 0;
+
+// 诊断统计
+volatile uint32_t g_rxFrames = 0;
+volatile uint32_t g_rxLastLeds = 0;
 
 // 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
 static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
@@ -66,10 +70,10 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
         }
         s_rxLastUs = t;
     }
-    // 立即挂起下一轮接收（ping-pong 缓冲）
+    // 立即挂起下一轮接收（ping-pong 缓冲，续接拼接长帧）
     s_rxBufIdx = 1 - s_rxBufIdx;
     rmt_receive(ch, (void*)s_rxBuffs[s_rxBufIdx],
-                RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
     return true;
 }
 
@@ -84,7 +88,7 @@ void fcInputInit() {
     cfg.gpio_num = PIN_FC_IN;
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
-    cfg.mem_block_symbols = RMT_MEM_BLOCK;
+    cfg.mem_block_symbols = RX_MEM_BLOCK_SYMBOLS; // 256：减少续接次数，防长帧丢段
     // 关键：ESP32-C3 的 RMT 不支持 DMA（with_dma=true 返回 ESP_ERR_NOT_SUPPORTED 0x106）。
     // 去掉 DMA：ISR 每收到 64 符号触发一次 done，回调里续接接收并拼接成完整帧。
     // cfg.flags.with_dma = false;（默认即 false，不设置）
@@ -110,26 +114,28 @@ void fcInputInit() {
     s_rxRecvCfg.signal_range_min_ns = RX_SIGNAL_MIN_NS;
     s_rxRecvCfg.signal_range_max_ns = RX_SIGNAL_MAX_NS;
     rmt_receive(s_rxCh, (void*)s_rxBuffs[0],
-                RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
 
     // 最后再确保一次上拉（GPIO 配置以此次为准）
     gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
 }
 
 // ---------- 解码：符号流 → GRB 灯色 ----------
-// 每个 symbol 对应 1 bit：高电平时长 >= 0.6µs(24 tick @40MHz) 为 1，否则 0
-// 24 bit = 1 颗灯，顺序 G-R-B（WS2812/Betaflight 原生顺序）
+// 每个 symbol 对应 1 bit：取其中【高电平段】的时长（≥0.6µs/24 tick 为 1），
+// 兼容 RMT RX 捕获的 (高,低) 或 (低,高) 两种电平对方向；24 bit = 1 颗灯，顺序 G-R-B
 static int decodeFrame(const rmt_symbol_word_t* sym, int n, RGB* out, int maxLeds) {
     uint8_t byte = 0;
     int bits = 0, byteIdx = 0, ledIdx = 0;
     uint8_t grb[3] = {0, 0, 0};
     int start = 0;
 
-    // 跳过可能捕获到的空闲低电平开头（首个完整高电平 symbol 才开始）
-    while (start < n && sym[start].level0 == 0) start++;
+    // 跳过帧前空闲段（两段都不含高电平：reset 低电平等）
+    while (start < n && sym[start].level0 == 0 && sym[start].level1 == 0) start++;
 
     for (int i = start; i < n && ledIdx < maxLeds; i++) {
-        bool one = (sym[i].duration0 >= TICK_HI_THRESHOLD);
+        // 高电平段的时长：level0==1 则取 duration0，否则取 duration1
+        uint32_t hiDur = (sym[i].level0 == 1) ? sym[i].duration0 : sym[i].duration1;
+        bool one = (hiDur >= TICK_HI_THRESHOLD);
         byte = (uint8_t)((byte << 1) | (one ? 1 : 0));
         bits++;
         if (bits == 8) {
@@ -166,7 +172,7 @@ bool pollFcInput(FcFrame* out) {
             s_doneWinUs = 0;
             s_doneInWin = 0;
             rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
-                        RMT_MEM_BLOCK * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                        RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
         }
     }
 
@@ -185,5 +191,9 @@ bool pollFcInput(FcFrame* out) {
 
     if (!frameDone) return false;
     out->count = decodeFrame(s_local, (int)len, out->leds, FC_MAX_LEDS);
+    if (out->count > 0) {
+        g_rxFrames++;
+        g_rxLastLeds = (uint32_t)out->count;
+    }
     return out->count > 0;
 }
