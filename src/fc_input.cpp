@@ -44,9 +44,11 @@ static rmt_channel_handle_t s_rxCh = NULL;
 static rmt_receive_config_t s_rxRecvCfg;
 static esp_err_t s_rxErr = ESP_OK; // RX 初始化失败错误码（延迟到 USB 就绪后打印）
 static uint16_t s_rxBlock = RX_MEM_BLOCK_SYMBOLS; // 实际创建的 mem_block 大小（自动降级后）
+static bool s_rxPartial = false;   // 是否以 en_partial_rx 流式模式创建（长帧续接）
 
 bool fcRxOk() { return s_rxCh != NULL; }
 int  fcRxErr() { return (int)s_rxErr; }
+bool fcRxPartial() { return s_rxPartial; }
 
 // ---------- RMT 接收完成回调（ISR 上下文） ----------
 static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
@@ -104,15 +106,28 @@ void fcInputInit() {
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
     // C3 每通道 RMT 内存上限 192 符号（3 块），超限返回 ESP_ERR_NOT_FOUND(0x105)。
+    // 先试 en_partial_rx（长帧流式接收：buffer 满只通知、RMT 不停止，
+    // 消除"满→续接"间隙导致的后续信号丢失——实测普通续接每帧只收到前 64 符号=2颗灯）；
+    // 若芯片不支持 partial_rx 则回退普通模式。
     // 自动降级 [192 → 128 → 64]，取第一个能成功创建的最大值（续接次数最少）。
     static const int kBlockCandidates[] = { RX_MEM_BLOCK_SYMBOLS, 128, 64 };
     esp_err_t err = ESP_ERR_NOT_FOUND;
     for (size_t i = 0; i < sizeof(kBlockCandidates) / sizeof(kBlockCandidates[0]); i++) {
         cfg.mem_block_symbols = kBlockCandidates[i];
+        cfg.flags.en_partial_rx = true;
         err = rmt_new_rx_channel(&cfg, &s_rxCh);
         if (err == ESP_OK) {
-            s_rxBlock = (uint16_t)cfg.mem_block_symbols; // 记录实际块大小
-            s_rxErr = ESP_OK; // 清除降级尝试的残留错误码
+            s_rxBlock = (uint16_t)cfg.mem_block_symbols;
+            s_rxErr = ESP_OK;
+            s_rxPartial = true; // partial 模式成功
+            break;
+        }
+        // partial_rx 不受支持：回退普通模式重试同尺寸
+        cfg.flags.en_partial_rx = false;
+        err = rmt_new_rx_channel(&cfg, &s_rxCh);
+        if (err == ESP_OK) {
+            s_rxBlock = (uint16_t)cfg.mem_block_symbols;
+            s_rxErr = ESP_OK;
             break;
         }
         s_rxErr = err;

@@ -32,3 +32,4 @@ extern volatile uint32_t g_rxRelayFail; // 续接 rmt_receive 失败次数
 extern volatile int      g_rxRelayErr;  // 最近一次续接失败错误码
 bool fcRxOk();    // RX 通道是否创建成功
 int  fcRxErr();   // RX 初始化失败错误码（0 = 无错误）
+bool fcRxPartial(); // 是否以 en_partial_rx 流式模式创建
