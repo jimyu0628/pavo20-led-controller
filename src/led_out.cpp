@@ -51,7 +51,10 @@ void ledOutInit() {
     cfg.resolution_hz = RMT_RES_HZ;
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
     cfg.trans_queue_depth = 4;
-    cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制
+    // 关键：ESP32-C3 的 RMT 不支持 DMA（with_dma=true 会返回 ESP_ERR_NOT_SUPPORTED 0x106，
+    // 通道创建失败 → 灯带永远收不到信号）。去掉 DMA 后 IDF 用中断分段编码发送，
+    // 任意长度（>64 符号的整帧）都能发。
+    // cfg.flags.with_dma = false;（默认即 false，不设置）
     esp_err_t err = rmt_new_tx_channel(&cfg, &s_txCh);
     if (err != ESP_OK) {
         s_ledErr = err; // 记录错误码，USB 就绪后由 main 打印（开机早期 printf 会丢）

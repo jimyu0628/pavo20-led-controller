@@ -85,7 +85,9 @@ void fcInputInit() {
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
     cfg.mem_block_symbols = RMT_MEM_BLOCK;
-    cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制
+    // 关键：ESP32-C3 的 RMT 不支持 DMA（with_dma=true 返回 ESP_ERR_NOT_SUPPORTED 0x106）。
+    // 去掉 DMA：ISR 每收到 64 符号触发一次 done，回调里续接接收并拼接成完整帧。
+    // cfg.flags.with_dma = false;（默认即 false，不设置）
     esp_err_t err = rmt_new_rx_channel(&cfg, &s_rxCh);
     if (err != ESP_OK) {
         // 初始化失败诊断：打印具体错误码
