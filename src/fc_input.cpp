@@ -41,6 +41,7 @@ static volatile uint32_t s_doneInWin = 0;    // 窗口内 done 计数
 static rmt_channel_handle_t s_rxCh = NULL;
 static rmt_receive_config_t s_rxRecvCfg;
 static esp_err_t s_rxErr = ESP_OK; // RX 初始化失败错误码（延迟到 USB 就绪后打印）
+static uint16_t s_rxBlock = RX_MEM_BLOCK_SYMBOLS; // 实际创建的 mem_block 大小（自动降级后）
 
 bool fcRxOk() { return s_rxCh != NULL; }
 int  fcRxErr() { return (int)s_rxErr; }
@@ -81,7 +82,7 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
     // 立即挂起下一轮接收（ping-pong 缓冲，续接拼接长帧）
     s_rxBufIdx = 1 - s_rxBufIdx;
     rmt_receive(ch, (void*)s_rxBuffs[s_rxBufIdx],
-                RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
     return true;
 }
 
@@ -96,13 +97,21 @@ void fcInputInit() {
     cfg.gpio_num = PIN_FC_IN;
     cfg.clk_src = RMT_CLK_SRC;          // 40MHz XTAL（C3 不支持 80MHz 分辨率）
     cfg.resolution_hz = RMT_RES_HZ;
-    cfg.mem_block_symbols = RX_MEM_BLOCK_SYMBOLS; // 256：减少续接次数，防长帧丢段
-    // 关键：ESP32-C3 的 RMT 不支持 DMA（with_dma=true 返回 ESP_ERR_NOT_SUPPORTED 0x106）。
-    // 去掉 DMA：ISR 每收到 64 符号触发一次 done，回调里续接接收并拼接成完整帧。
-    // cfg.flags.with_dma = false;（默认即 false，不设置）
-    esp_err_t err = rmt_new_rx_channel(&cfg, &s_rxCh);
-    if (err != ESP_OK) {
-        s_rxErr = err; // 记录错误码，USB 就绪后由 main 打印
+    // C3 每通道 RMT 内存上限 192 符号（3 块），超限返回 ESP_ERR_NOT_FOUND(0x105)。
+    // 自动降级 [192 → 128 → 64]，取第一个能成功创建的最大值（续接次数最少）。
+    static const int kBlockCandidates[] = { RX_MEM_BLOCK_SYMBOLS, 128, 64 };
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    for (size_t i = 0; i < sizeof(kBlockCandidates) / sizeof(kBlockCandidates[0]); i++) {
+        cfg.mem_block_symbols = kBlockCandidates[i];
+        err = rmt_new_rx_channel(&cfg, &s_rxCh);
+        if (err == ESP_OK) {
+            s_rxBlock = (uint16_t)cfg.mem_block_symbols; // 记录实际块大小
+            break;
+        }
+        s_rxErr = err;
+    }
+    if (s_rxCh == NULL) {
+        // 全部候选都失败：记录最后错误码，USB 就绪后由 main 打印
         return;
     }
 
@@ -121,7 +130,7 @@ void fcInputInit() {
     s_rxRecvCfg.signal_range_min_ns = RX_SIGNAL_MIN_NS;
     s_rxRecvCfg.signal_range_max_ns = RX_SIGNAL_MAX_NS;
     rmt_receive(s_rxCh, (void*)s_rxBuffs[0],
-                RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
 
     // 最后再确保一次上拉（GPIO 配置以此次为准）
     gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
@@ -179,7 +188,7 @@ bool pollFcInput(FcFrame* out) {
             s_doneWinUs = 0;
             s_doneInWin = 0;
             rmt_receive(s_rxCh, (void*)s_rxBuffs[s_rxBufIdx],
-                        RX_MEM_BLOCK_SYMBOLS * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+                        s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
         }
     }
 
