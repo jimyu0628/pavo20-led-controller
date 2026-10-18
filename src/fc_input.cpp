@@ -16,35 +16,39 @@
 #endif
 
 // ============================================================
-// 软件解码 v17：GPIO 双沿中断 + 时刻差测量
+// 软件解码 v18：GPIO 任意边沿中断 + 交替状态机（纯 cycle，无电平读、无定时器）
 // （替代 RMT RX —— ESP32-C3 的 RMT 每通道内存上限 64 符号，
 //  无 DMA、无 partial 流式，28 颗长帧(672 符号)续接必然丢段，只解出前 2 颗）
 //
-// 原理：GPIO4 任意边沿中断。上升沿记录时刻，下降沿用「下降沿时刻 - 上升沿
-// 时刻」得到该 bit 的高电平时长（WS2812 800kHz：高 800ns=1 / 高 400ns=0，
-// 阈值 600ns）。两个边沿走同一中断路径，进入延迟相互抵消，每个 bit
-// （含帧头第一个 bit）都精确测量 → 颜色不再错位。
+// 原理：WS2812 信号严格"高→低→高→低"交替（每 bit = 1 个高 + 1 个低）。
+// ANYEDGE 中断下，每 2 个边沿 = 1 bit：第 1 个边沿记录时刻（高开始），
+// 第 2 个边沿用「时刻差 - 高起点」得到该 bit 的高电平时长
+// （高 800ns=1 / 高 400ns=0，阈值 600ns）。
 //
-// 帧边界：帧内边沿间隔 ≤ 1.25µs；帧尾 reset ≥ 50µs；帧间空闲 10~20ms。
-// 最后边沿后 >2ms 无活动 → 帧完成（主循环判定并取帧）。
-// ISR 极短（仅记录），不忙等、不阻塞主循环；开销约 5% CPU（40k 中断/s）。
+// 帧头对齐：帧间空闲低电平（reset ≥50µs / 帧间 10~20ms）后，WS2812 帧
+// 必然以"低→高"上升沿开始（bit1）。因此：距最后边沿 >2ms 时，下一个边沿
+// 强制视为帧头上升沿并重置累积 → 每帧重新同步，不依赖读电平判方向。
+//
+// 中断丢失容错：偶发丢边沿会导致本帧错位（颜色偶乱），但每帧帧头重新同步，
+// 下一帧即恢复。ISR 前缀仅 cycle 读取（~200ns），远小于 400ns 最短 bit。
+// 帧完成：最后边沿后 >2ms 无活动（主循环判定并取帧）。
 // ============================================================
 
 #define FC_GPIO_BIT    (1u << 4)      // GPIO4
 // 160MHz 主频：1 cycle = 6.25ns
 #define FC_BIT_THRESHOLD_CYC 96       // 高电平 ≥600ns 判 1（bit1 高 800ns / bit0 高 400ns）
-#define FC_FRAME_IDLE_US 2000         // 最后边沿后 2ms 无活动 = 帧完成/帧间（帧内边沿 ≤1.25µs）
-#define FC_ABNORMAL_HI_CYC 256        // 高时长 >1.6µs 视为噪声/异常，忽略该 bit
+#define FC_FRAME_IDLE_CYC   320000    // 2ms @160MHz：帧内边沿间隔 ≤850ns，2ms 远大于帧尾 reset
+#define FC_ABNORMAL_HI_CYC  256       // 高时长 >1.6µs 视为噪声/异常，忽略该 bit
 
 // ---------- ISR 与主循环共享 ----------
 static portMUX_TYPE s_rxLock = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t s_riseCyc = 0;    // 最近上升沿时刻（cycle）
-static volatile bool     s_haveRise = false; // 已捕获上升沿，等待下降沿配对
+static volatile uint32_t s_riseCyc = 0;    // 当前 bit 高起点时刻（cycle）
+static volatile bool     s_expectRise = true; // 状态机：期望上升沿（帧头对齐后交替）
 static volatile uint32_t s_swBits = 0;     // 累积 bit（GRB 高位在前）
 static volatile uint8_t  s_swBitCnt = 0;
 static volatile RGB      s_swLeds[FC_MAX_LEDS];
 static volatile int      s_swLedCnt = 0;
-static volatile uint32_t s_swLastUs = 0;   // 最后边沿时间（µs，帧判定用）
+static volatile uint32_t s_swLastCyc = 0;  // 最后边沿时刻（cycle，帧判定用）
 
 // 诊断统计
 volatile uint32_t g_rxFrames = 0;
@@ -78,39 +82,37 @@ static inline void IRAM_ATTR swPushBit(bool one) {
     g_rxSyms = (uint32_t)(g_rxSyms + 1);
 }
 
-// ---------- GPIO 任意边沿中断（极短，只记录时刻） ----------
+// ---------- GPIO 任意边沿中断（状态机，纯 cycle，极短） ----------
 static void IRAM_ATTR fcEdgeIsr(void* arg) {
     (void)arg;
     uint32_t cyc = esp_cpu_get_cycle_count();
-    uint32_t nowUs = (uint32_t)esp_timer_get_time();
-    int lvl = (REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) ? 1 : 0;
 
-    if (lvl == 1) {
-        // 上升沿：帧间空闲（>2ms 无活动）后的第一个上升沿 = 新帧开始
-        if (nowUs - s_swLastUs > FC_FRAME_IDLE_US) {
-            s_swBits = 0;
-            s_swBitCnt = 0;
-            s_swLedCnt = 0;
-            s_haveRise = false;
-            g_rxDone = (uint32_t)(g_rxDone + 1);
-        }
+    // 帧间空闲（距最后边沿 >2ms）后的边沿：帧间低电平 → WS2812 帧必以
+    // 上升沿开始 → 强制作为新帧帧头（重置累积，期望下一次是下降沿）
+    if (cyc - s_swLastCyc > FC_FRAME_IDLE_CYC) {
+        s_swBits = 0;
+        s_swBitCnt = 0;
+        s_swLedCnt = 0;
+        s_riseCyc = cyc;          // 帧头上升沿：记录 bit1 高起点
+        s_expectRise = false;     // 下一期望：下降沿
+        g_rxDone = (uint32_t)(g_rxDone + 1);
+        s_swLastCyc = cyc;
+        return;
+    }
+
+    if (s_expectRise) {
         s_riseCyc = cyc;
-        s_haveRise = true;
+        s_expectRise = false;
     } else {
-        // 下降沿：与最近上升沿配对测高
-        if (s_haveRise) {
-            uint32_t hi = cyc - s_riseCyc;
-            s_haveRise = false;
-            if (hi > FC_ABNORMAL_HI_CYC) {
-                g_rxDrop = (uint32_t)(g_rxDrop + 1); // 异常高：噪声，忽略
-            } else {
-                swPushBit(hi > FC_BIT_THRESHOLD_CYC);
-            }
+        uint32_t hi = cyc - s_riseCyc;
+        s_expectRise = true;
+        if (hi > FC_ABNORMAL_HI_CYC) {
+            g_rxDrop = (uint32_t)(g_rxDrop + 1); // 异常高：噪声，忽略该 bit
         } else {
-            g_rxDrop = (uint32_t)(g_rxDrop + 1); // 无配对的下降沿
+            swPushBit(hi > FC_BIT_THRESHOLD_CYC);
         }
     }
-    s_swLastUs = nowUs;
+    s_swLastCyc = cyc;
 }
 
 // ---------- 初始化 ----------
@@ -150,8 +152,8 @@ bool pollFcInput(FcFrame* out) {
     return false;
 #endif
     if (s_swLedCnt == 0) return false;
-    uint32_t nowUs = (uint32_t)esp_timer_get_time();
-    if (nowUs - s_swLastUs < FC_FRAME_IDLE_US) return false; // 帧仍在进行
+    uint32_t nowCyc = esp_cpu_get_cycle_count();
+    if (nowCyc - s_swLastCyc < FC_FRAME_IDLE_CYC) return false; // 帧仍在进行
 
     portENTER_CRITICAL(&s_rxLock);
     int n = (int)s_swLedCnt;
@@ -165,7 +167,7 @@ bool pollFcInput(FcFrame* out) {
     s_swLedCnt = 0;
     s_swBits = 0;
     s_swBitCnt = 0;
-    s_haveRise = false;
+    s_expectRise = true;
     portEXIT_CRITICAL(&s_rxLock);
 
     out->count = n;
