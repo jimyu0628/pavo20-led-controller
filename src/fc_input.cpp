@@ -81,15 +81,20 @@ static inline void IRAM_ATTR swPushBit(bool one) {
 static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
 
-    // 第一段：忙等变低（当前 bit 的高电平结束）。
-    // 带超时：若 20µs 内电平不变低 = 帧间空闲高电平 / 上一帧忙等期间锁存的
-    // 边沿误触发 → 直接返回【不清任何状态】，避免把上一帧刚置的 frameDone
-    // 清掉导致主循环永远取不到帧（frames=0 的根因之一）。
+    // 测量第一个 bit 的剩余高电平（从 ISR 代码开始到变低）。
+    // 带超时：20µs 内电平不变低 = 帧间空闲高 / 忙等期间锁存的边沿误触发
+    // → 直接返回【不清任何状态】，保护上一帧刚置的 frameDone。
+    // 进入时电平已低（锁存/帧间低）→ firstHi≈0 → 弃帧（同样不重置状态）。
     uint32_t a0 = esp_cpu_get_cycle_count();
     while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
         if ((esp_cpu_get_cycle_count() - a0) > FC_RESET_TIMEOUT_CYC) {
             return;
         }
+    }
+    uint32_t firstHi = esp_cpu_get_cycle_count() - a0;
+    if (firstHi < FC_BIT_MIN_CYC) {
+        g_rxDrop = (uint32_t)(g_rxDrop + 1); // 帧头不可靠：弃帧，保留上一帧完成状态
+        return;
     }
 
     // 确认是真新帧：清累积
@@ -99,17 +104,6 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     s_swFrameDone = false;
     g_rxDone = (uint32_t)(g_rxDone + 1);
 
-    // 第一个 bit 的高电平：中断进入时可能已过部分/全部，忙等变低测剩余。
-    // 若剩余 < 200ns 视为帧头不可靠 → 放弃本帧（等待下一帧重新同步），
-    // 避免产生"开头错位"的坏帧。
-    uint32_t t0 = esp_cpu_get_cycle_count();
-    while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) { }
-    uint32_t t1 = esp_cpu_get_cycle_count();
-    uint32_t firstHi = t1 - t0;
-    if (firstHi < FC_BIT_MIN_CYC) {
-        g_rxDrop = (uint32_t)(g_rxDrop + 1); // 帧头不可靠：弃帧，等下一帧重新同步
-        return;
-    }
     swPushBit(firstHi > FC_BIT_THRESHOLD_CYC);
 
     // 连续测量后续 bit：忙等"变高→变低"交替；
