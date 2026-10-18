@@ -29,6 +29,8 @@ volatile uint32_t g_rxFrames = 0;
 volatile uint32_t g_rxLastLeds = 0;
 volatile uint32_t g_rxDone = 0;   // RMT RX done 回调累计次数（是否收到任何数据）
 volatile uint32_t g_rxSyms = 0;   // 累计接收符号数
+volatile uint32_t g_rxRelayFail = 0; // 续接 rmt_receive 失败次数
+volatile int      g_rxRelayErr = 0;  // 最近一次续接失败错误码
 
 // 噪声风暴防护（GPIO 悬空时 RMT RX 会被环境噪声触发中断风暴，饿死 IDLE 任务）
 static volatile bool s_rxStorm = false;      // 风暴标志：ISR 已停止挂接，等主循环恢复
@@ -81,8 +83,12 @@ static bool IRAM_ATTR rxDoneCb(rmt_channel_handle_t ch,
     }
     // 立即挂起下一轮接收（ping-pong 缓冲，续接拼接长帧）
     s_rxBufIdx = 1 - s_rxBufIdx;
-    rmt_receive(ch, (void*)s_rxBuffs[s_rxBufIdx],
-                s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+    esp_err_t relayErr = rmt_receive(ch, (void*)s_rxBuffs[s_rxBufIdx],
+                                     s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+    if (relayErr != ESP_OK) {
+        g_rxRelayFail++;
+        g_rxRelayErr = (int)relayErr;   // 诊断：续接失败错误码
+    }
     return true;
 }
 
@@ -106,6 +112,7 @@ void fcInputInit() {
         err = rmt_new_rx_channel(&cfg, &s_rxCh);
         if (err == ESP_OK) {
             s_rxBlock = (uint16_t)cfg.mem_block_symbols; // 记录实际块大小
+            s_rxErr = ESP_OK; // 清除降级尝试的残留错误码
             break;
         }
         s_rxErr = err;
@@ -129,8 +136,9 @@ void fcInputInit() {
     s_rxRecvCfg = {};
     s_rxRecvCfg.signal_range_min_ns = RX_SIGNAL_MIN_NS;
     s_rxRecvCfg.signal_range_max_ns = RX_SIGNAL_MAX_NS;
-    rmt_receive(s_rxCh, (void*)s_rxBuffs[0],
-                s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+    esp_err_t rxStart = rmt_receive(s_rxCh, (void*)s_rxBuffs[0],
+                                    s_rxBlock * sizeof(rmt_symbol_word_t), &s_rxRecvCfg);
+    if (rxStart != ESP_OK) s_rxErr = rxStart;
 
     // 最后再确保一次上拉（GPIO 配置以此次为准）
     gpio_set_pull_mode(PIN_FC_IN, GPIO_PULLUP_ONLY);
