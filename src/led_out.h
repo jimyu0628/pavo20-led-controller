@@ -15,3 +15,7 @@ void showStrip(const RGB* leds, int n);
 
 // 已成功发送的帧计数（主循环每秒读一次打印心跳，用于确认信号确实在发）
 extern volatile uint32_t g_txCount;
+
+// 初始化结果诊断（USB 串口就绪后由 main 打印，避免开机早期日志丢失）
+bool ledOutOk();    // TX 通道与编码器是否都创建成功
+int  ledOutErr();   // 最近一次初始化失败的错误码（0 = 无错误）

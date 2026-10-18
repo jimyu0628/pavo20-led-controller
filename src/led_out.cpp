@@ -10,6 +10,10 @@ static rmt_encoder_handle_t s_copyEnc = NULL;
 static rmt_symbol_word_t s_txSymbols[STRIP_MAX_LEDS * 24 + 1];
 
 volatile uint32_t g_txCount = 0; // 成功发送帧计数（心跳诊断）
+static esp_err_t s_ledErr = ESP_OK; // 初始化失败错误码（延迟到 USB 就绪后打印）
+
+bool ledOutOk() { return s_txCh != NULL && s_copyEnc != NULL; }
+int  ledOutErr() { return (int)s_ledErr; }
 
 // ---------- 编码：RGB 数组 → WS2812 符号流（GRB，MSB first） ----------
 static int encodeStripToSymbols(const RGB* leds, int n, rmt_symbol_word_t* sym) {
@@ -50,16 +54,14 @@ void ledOutInit() {
     cfg.flags.with_dma = true; // DMA 流式，符号数不受内存块限制
     esp_err_t err = rmt_new_tx_channel(&cfg, &s_txCh);
     if (err != ESP_OK) {
-        // 初始化失败诊断：打印具体错误码（ESP_ERR_INVALID_ARG=0x102 等）
-        printf("[LED] rmt_new_tx_channel FAILED: %s (0x%x)\n", esp_err_to_name(err), err);
+        s_ledErr = err; // 记录错误码，USB 就绪后由 main 打印（开机早期 printf 会丢）
         return;
     }
 
     rmt_copy_encoder_config_t encCfg = {};
     esp_err_t err2 = rmt_new_copy_encoder(&encCfg, &s_copyEnc);
     if (err2 != ESP_OK) {
-        // 初始化失败诊断：打印具体错误码
-        printf("[LED] rmt_new_copy_encoder FAILED: %s (0x%x)\n", esp_err_to_name(err2), err2);
+        s_ledErr = err2; // 记录错误码
         return;
     }
 
