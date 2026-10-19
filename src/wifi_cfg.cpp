@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "esp_netif_ip_addr.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
@@ -20,10 +21,10 @@
 
 #define WIFI_SSID       "RGBled"
 #define WIFI_PASS       "12345678"
-#define WIFI_CHANNEL    6
+#define WIFI_CHANNEL    1
 #define WIFI_MAX_CONN   4
-#define OFF_NO_HTTP_MS  60000   // 关闭网页（无 HTTP 请求）60s 后关
-#define OFF_NO_STA_MS   30000   // 上电后 30s 无手机连接则关
+#define OFF_NO_HTTP_MS  300000  // 关闭网页/无操作 5 分钟后关（v25 从 60s 延长）
+#define OFF_NO_STA_MS   300000  // 上电后 5 分钟无手机连接则关（v25 从 30s 延长）
 
 static httpd_handle_t s_httpd = NULL;
 static volatile bool  s_wifiUp = false;
@@ -217,10 +218,25 @@ void wifiCfgInit() {
     wc.ap.authmode = WIFI_AUTH_WPA2_PSK;
 
     if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK ||
-        esp_wifi_set_config(WIFI_IF_AP, &wc) != ESP_OK ||
-        esp_wifi_start() != ESP_OK) {
-        printf("[WiFi] start FAILED\n");
+        esp_wifi_set_config(WIFI_IF_AP, &wc) != ESP_OK) {
+        printf("[WiFi] set config FAILED\n");
         return;
+    }
+    esp_err_t rs = esp_wifi_start();
+    if (rs != ESP_OK) {
+        printf("[WiFi] start FAILED 0x%x\n", rs);
+        return;
+    }
+    // 诊断：回读实际配置与 AP IP，确认广播参数已生效
+    wifi_config_t cur = {};
+    if (esp_wifi_get_config(WIFI_IF_AP, &cur) == ESP_OK)
+        printf("[WiFi] cfg: ssid=\"%s\" ch=%d auth=%d\n",
+               (const char*)cur.ap.ssid, cur.ap.channel, cur.ap.authmode);
+    esp_netif_t* apn = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    if (apn) {
+        esp_netif_ip_info_t ip;
+        if (esp_netif_get_ip_info(apn, &ip) == ESP_OK)
+            printf("[WiFi] IP=" IPSTR "\n", IP2STR(&ip.ip));
     }
     s_wifiUp = true;
     s_startUs = esp_timer_get_time();
