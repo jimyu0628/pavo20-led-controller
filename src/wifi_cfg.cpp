@@ -189,6 +189,7 @@ static void wifiStopAll() {
 
 // ---------- 初始化 ----------
 void wifiCfgInit() {
+    esp_netif_init(); // 必须先初始化 netif 层，否则 create_default_wifi_ap 报 INVALID_STATE
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
