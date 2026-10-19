@@ -27,12 +27,10 @@ bool pollFcInput(FcFrame* out);
 // 诊断统计（主循环心跳打印用）
 extern volatile uint32_t g_rxFrames;   // 累计成功解码的飞控帧数
 extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数
-extern volatile uint32_t g_rxDone;     // 帧头（新帧）次数
+extern volatile uint32_t g_rxDone;     // 帧头中断次数
 extern volatile uint32_t g_rxSyms;     // 累计解码 bit 数
-extern volatile uint32_t g_rxBitLike;  // 边沿间隔 ∈[40,140]cycle（真 bit 候选）
-extern volatile uint32_t g_rxMid;      // 边沿间隔 ∈(140,256]cycle（边缘）
-extern volatile uint32_t g_rxDrop;     // 边沿间隔 >256cycle（异常/噪声）
-extern volatile uint32_t g_rxFrameEnd; // 主循环取帧次数
-extern volatile uint32_t g_rxLedAtEnd; // 最近取帧的灯数
+extern volatile uint32_t g_rxDrop;     // 帧头不可靠丢弃帧数
+extern volatile uint32_t g_rxFrameEnd; // ISR 置"帧完成"次数
+extern volatile uint32_t g_rxLedAtEnd; // 最近一次帧完成时的灯数
 bool fcRxOk();    // 软件解码是否初始化成功
 int  fcRxErr();   // 初始化失败错误码（0 = 无错误）
