@@ -55,7 +55,9 @@ volatile uint32_t g_rxFrames = 0;
 volatile uint32_t g_rxLastLeds = 0;
 volatile uint32_t g_rxDone = 0;      // 软件解码：帧头（新帧）次数
 volatile uint32_t g_rxSyms = 0;      // 软件解码：累计 bit 数
-volatile uint32_t g_rxDrop = 0;      // 软件解码：异常/无配对边沿丢弃计数
+volatile uint32_t g_rxBitLike = 0;   // 边沿间隔 ∈[40,140]cycle（真 WS2812 bit 候选）
+volatile uint32_t g_rxMid = 0;       // 边沿间隔 ∈(140,256]cycle（边缘/异常半周期）
+volatile uint32_t g_rxDrop = 0;      // 边沿间隔 >256cycle（异常高/噪声）
 volatile uint32_t g_rxFrameEnd = 0;  // 软件解码：主循环取帧次数
 volatile uint32_t g_rxLedAtEnd = 0;  // 软件解码：最近取帧的灯数
 static esp_err_t s_rxErr = ESP_OK;
@@ -106,10 +108,15 @@ static void IRAM_ATTR fcEdgeIsr(void* arg) {
     } else {
         uint32_t hi = cyc - s_riseCyc;
         s_expectRise = true;
-        if (hi > FC_ABNORMAL_HI_CYC) {
-            g_rxDrop = (uint32_t)(g_rxDrop + 1); // 异常高：噪声，忽略该 bit
-        } else {
+        if (hi < 40) {
+            g_rxMid = (uint32_t)(g_rxMid + 1);          // 太短（<250ns）：噪声
+        } else if (hi <= 140) {
+            g_rxBitLike = (uint32_t)(g_rxBitLike + 1);  // 真 WS2812 bit 候选（400~875ns）
             swPushBit(hi > FC_BIT_THRESHOLD_CYC);
+        } else if (hi <= 256) {
+            g_rxMid = (uint32_t)(g_rxMid + 1);          // 边缘（875ns~1.6µs）
+        } else {
+            g_rxDrop = (uint32_t)(g_rxDrop + 1);        // 异常（>1.6µs）：噪声/错误信号
         }
     }
     s_swLastCyc = cyc;
