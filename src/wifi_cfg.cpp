@@ -8,6 +8,9 @@
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -175,6 +178,69 @@ static esp_err_t handler_root(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// ========== Captive Portal：DNS 劫持（手机探测域名 → 192.168.4.1） ==========
+// 手机连上热点后会自动探测网络（generate_204 / captive.apple.com 等），
+// 劫持 DNS 应答为 AP 地址，配合 HTTP 302 重定向，手机自动弹出设置页。
+static void dnsTask(void* arg) {
+    (void)arg;
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) { printf("[WiFi] dns socket FAIL\n"); vTaskDelete(NULL); return; }
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(53);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        // 53 被占用：dhcps 可能已内置 DNS 应答，无需自建
+        printf("[WiFi] dns bind fail (dhcps DNS likely active)\n");
+        close(sock);
+        vTaskDelete(NULL);
+        return;
+    }
+    printf("[WiFi] DNS captive: 53 -> 192.168.4.1\n");
+    char buf[512];
+    for (;;) {
+        struct sockaddr_in from = {};
+        socklen_t fl = sizeof(from);
+        int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fl);
+        if (n < 12) continue;
+        uint16_t qd = (uint16_t)(((uint8_t)buf[4]) << 8 | (uint8_t)buf[5]);
+        if (qd == 0) continue;
+        int pos = 12;
+        while (pos < n && buf[pos] != 0) pos += (uint8_t)buf[pos] + 1;
+        if (pos >= n) continue;
+        pos += 5; // 跳过 00 + QTYPE(2) + QCLASS(2)
+        if (pos > n || 12 + (pos - 12) + 16 > (int)sizeof(buf)) continue;
+        uint16_t nf = (uint16_t)(((uint8_t)buf[2]) << 8 | (uint8_t)buf[3]);
+        nf |= 0x8080; nf &= ~0x000F;  // QR=1 RA=1 RCODE=0
+        buf[2] = (uint8_t)(nf >> 8); buf[3] = (uint8_t)(nf & 0xFF);
+        buf[6] = 0; buf[7] = 1;   // ANCOUNT=1
+        buf[8] = 0; buf[9] = 0;   // NSCOUNT=0
+        buf[10] = 0; buf[11] = 0; // ARCOUNT=0
+        int p = pos;
+        buf[p++] = 0xC0; buf[p++] = 0x0C;              // 指针 → 问题名（offset 12）
+        buf[p++] = 0; buf[p++] = 1;                    // TYPE A
+        buf[p++] = 0; buf[p++] = 1;                    // CLASS IN
+        buf[p++] = 0; buf[p++] = 0; buf[p++] = 0; buf[p++] = 60; // TTL 60s
+        buf[p++] = 0; buf[p++] = 4;                    // RDLENGTH=4
+        uint32_t ip = htonl(0xC0A80101);               // 192.168.4.1
+        memcpy(buf + p, &ip, 4); p += 4;
+        sendto(sock, buf, p, 0, (struct sockaddr*)&from, fl);
+    }
+}
+
+// ========== Captive Portal：HTTP 重定向（探测路径 → 设置页首页） ==========
+static esp_err_t handler_captive(httpd_req_t* req) {
+    if (strncmp(req->uri, "/api/", 5) == 0) { // 不劫持 API，避免干扰网页轮询
+        httpd_resp_send_404(req);
+        return ESP_OK;
+    }
+    touchHttp();
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_sendstr(req, "");
+    return ESP_OK;
+}
+
 // ---------- 关闭全部（httpd + wifi） ----------
 static void wifiStopAll() {
     if (!s_wifiUp) return;
@@ -244,15 +310,18 @@ void wifiCfgInit() {
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
         static const httpd_uri_t u_set   = {.uri="/api/set",   .method=HTTP_GET, .handler=handler_set,   .user_ctx=NULL};
         static const httpd_uri_t u_off   = {.uri="/api/wifi/off", .method=HTTP_GET, .handler=handler_off, .user_ctx=NULL};
+        static const httpd_uri_t u_capt  = {.uri="/*",         .method=HTTP_GET, .handler=handler_captive, .user_ctx=NULL};
         httpd_register_uri_handler(s_httpd, &u_root);
         httpd_register_uri_handler(s_httpd, &u_state);
         httpd_register_uri_handler(s_httpd, &u_set);
         httpd_register_uri_handler(s_httpd, &u_off);
+        httpd_register_uri_handler(s_httpd, &u_capt); // 通配放最后：精确路由优先
         printf("[WiFi] 热点 RGBled 已开启（密码 12345678），5 分钟无连接自动关闭\n");
     } else {
         printf("[WiFi] httpd FAILED\n");
         s_httpd = NULL;
     }
+    xTaskCreate(dnsTask, "dns", 4096, NULL, 5, NULL); // 常驻：热点关闭后无人查询，无害
 }
 
 // ---------- 状态查询 ----------
