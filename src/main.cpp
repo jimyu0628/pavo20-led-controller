@@ -22,6 +22,7 @@
 #include "fc_input.h"
 #include "led_out.h"
 #include "button.h"
+#include "wifi_cfg.h"
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) {
@@ -205,6 +206,33 @@ static void handleButton(ButtonEvent ev) {
             break;
     }
 }
+// ---------- Web 设置接口（wifi_cfg 模块调用） ----------
+// 状态读取
+int webGetMode()   { return s_mode; }
+int webGetColor()  { return s_colorIdx; }
+int webGetSpeed()  { return s_speedIdx; }
+int webGetBright() { return s_brightIdx; }
+int webGetCalib()  { return s_calibCount; }
+bool webIsCalibrating() { return s_calibrating; }
+// 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
+void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; } }
+void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
+void webSetSpeed(int v)  { if (v >= 0 && v < SPEED_COUNT) { s_speedIdx = v; savePrefs(); } }
+void webSetBright(int v) { if (v >= 0 && v < BRIGHT_COUNT) { s_brightIdx = v; savePrefs(); } }
+// 立即按当前设置刷新灯带（模式切换即时生效；标定中不干预）
+void webApplyNow() {
+    if (s_calibrating) return;
+    if (s_mode == 0) {
+        if (!s_fcActive) { // Betaflight 无飞控：灭灯
+            for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+            refreshStrip();
+        }
+    } else {
+        renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
+        applyBrightness(s_strip, s_stripLen, BRIGHT_SCALE[s_brightIdx]);
+        refreshStrip();
+    }
+}
 // ---------- 主程序入口 ----------
 extern "C" void app_main(void) {
     nvsInit();
@@ -212,6 +240,7 @@ extern "C" void app_main(void) {
     buttonInit();
     ledOutInit();
     fcInputInit();
+    wifiCfgInit(); // AP 热点 RGBled + Web 设置（30s 无连接自动关闭）
     // 开机自检：白灯闪 1s（肉眼确认灯带与信号链路；不经过亮度缩放，应是纯白）
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(255, 255, 255);
     refreshStrip();
@@ -220,7 +249,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v16 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v21 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
@@ -234,6 +263,7 @@ extern "C" void app_main(void) {
         // 0) 发送心跳：每秒打印 TX/RX 状态与统计（错误码每秒重复，防截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
+            wifiCfgPoll(now); // 每秒：判定关闭 WiFi（30s 无连接 / 60s 无访问 / 网页请求）
             uint32_t cur = (uint32_t)g_txCount;
             logMsg("[LED] tx=%u/s ok=%d err=0x%x | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
