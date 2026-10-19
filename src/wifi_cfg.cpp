@@ -33,6 +33,7 @@ static volatile bool  s_offRequested = false;  // 网页请求关闭
 static volatile bool  s_stopping = false;
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
+static char s_cfgStr[40];                  // 启动时缓存 "SSID/IP" 供心跳显示
 
 // ---------- 内部 ----------
 static void wifiStopAll();
@@ -227,17 +228,21 @@ void wifiCfgInit() {
         printf("[WiFi] start FAILED 0x%x\n", rs);
         return;
     }
-    // 诊断：回读实际配置与 AP IP，确认广播参数已生效
+    // 诊断：回读实际配置与 AP IP（缓存供心跳显示，启动 printf 可能被串口时序吞掉）
     wifi_config_t cur = {};
     if (esp_wifi_get_config(WIFI_IF_AP, &cur) == ESP_OK)
-        printf("[WiFi] cfg: ssid=\"%s\" ch=%d auth=%d\n",
-               (const char*)cur.ap.ssid, cur.ap.channel, cur.ap.authmode);
+        snprintf(s_cfgStr, sizeof(s_cfgStr), "%s", (const char*)cur.ap.ssid);
     esp_netif_t* apn = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     if (apn) {
         esp_netif_ip_info_t ip;
-        if (esp_netif_get_ip_info(apn, &ip) == ESP_OK)
-            printf("[WiFi] IP=" IPSTR "\n", IP2STR(&ip.ip));
+        if (esp_netif_get_ip_info(apn, &ip) == ESP_OK) {
+            char ib[16];
+            snprintf(ib, sizeof(ib), IPSTR, IP2STR(&ip.ip));
+            snprintf(s_cfgStr + strlen(s_cfgStr), sizeof(s_cfgStr) - strlen(s_cfgStr),
+                     "/%s", ib);
+        }
     }
+    printf("[WiFi] AP up: %s\n", s_cfgStr);
     s_wifiUp = true;
     s_startUs = esp_timer_get_time();
     s_lastHttpUs = s_startUs;
@@ -264,6 +269,10 @@ void wifiCfgInit() {
 int wifiCfgState() {
     if (!s_wifiUp) return 0;
     return s_everConnected ? 2 : 1;
+}
+
+const char* wifiCfgStr() {
+    return s_wifiUp ? s_cfgStr : "";
 }
 
 // ---------- 每秒判定关闭 ----------

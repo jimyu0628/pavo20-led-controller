@@ -18,6 +18,9 @@ void wifiCfgPoll(uint32_t nowMs);
 // 热点状态：0=已关闭 1=开启(未连过) 2=开启(曾连/保持期)
 int wifiCfgState();
 
+// 热点诊断字符串（SSID/IP），供心跳显示；热点关闭时返回 ""
+const char* wifiCfgStr();
+
 // ---- Web 设置接口（由 main.cpp 实现，读写主程序状态） ----
 int  webGetMode();
 int  webGetColor();
