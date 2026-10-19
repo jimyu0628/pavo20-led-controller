@@ -33,7 +33,7 @@ static volatile bool  s_offRequested = false;  // 网页请求关闭
 static volatile bool  s_stopping = false;
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
-static char s_cfgStr[40];                  // 启动时缓存 "SSID/IP" 供心跳显示
+static char s_cfgStr[64];                  // 启动时缓存 "SSID/IP" 供心跳显示（SSID 最长 32 + IP 15 + 前缀后缀，64 防截断警告）
 
 // ---------- 内部 ----------
 static void wifiStopAll();
