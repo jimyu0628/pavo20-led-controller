@@ -220,13 +220,14 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v19 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v20 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
            ledOutOk() ? "OK" : "FAIL", (unsigned)ledOutErr());
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
+    uint32_t lastFrameLogMs = 0;
     uint32_t lastTxTotal = 0;
     FcFrame frame;
     while (1) {
@@ -259,6 +260,15 @@ extern "C" void app_main(void) {
                 mapFcToStrip(frame);
                 s_fcActive = true;
                 s_lastFcMs = now;
+                // 诊断：每 2 秒打印一帧实际解码颜色（前 3 颗 GRB），对照飞控期望
+                if (now - lastFrameLogMs >= 2000) {
+                    lastFrameLogMs = now;
+                    logMsg("[FRAME] n=%d L0=%u,%u,%u L1=%u,%u,%u L2=%u,%u,%u\n",
+                           frame.count,
+                           (unsigned)frame.leds[0].g, (unsigned)frame.leds[0].r, (unsigned)frame.leds[0].b,
+                           (unsigned)frame.leds[1].g, (unsigned)frame.leds[1].r, (unsigned)frame.leds[1].b,
+                           (unsigned)frame.leds[2].g, (unsigned)frame.leds[2].r, (unsigned)frame.leds[2].b);
+                }
             }
         }
         // 3) 飞控信号丢失：超时后释放接管，恢复当前模式显示

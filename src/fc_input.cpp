@@ -3,63 +3,60 @@
 #include <stdio.h>
 #include "esp_err.h"
 #include "esp_cpu.h"
-#include "esp_timer.h"
 #include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 #include "driver/gpio.h"
 #include "soc/gpio_reg.h"
 
 // 诊断开关：0 = 完全禁用 RX（不开中断、不接收）
-// 用于二分定位"中断风暴饿死 IDLE"的风暴源是否来自飞控输入 RX
 #ifndef FC_INPUT_ENABLE
 #define FC_INPUT_ENABLE 1
 #endif
 
 // ============================================================
-// 软件解码 v18：GPIO 任意边沿中断 + 交替状态机（纯 cycle，无电平读、无定时器）
-// （替代 RMT RX —— ESP32-C3 的 RMT 每通道内存上限 64 符号，
-//  无 DMA、无 partial 流式，28 颗长帧(672 符号)续接必然丢段，只解出前 2 颗）
+// 软件解码 v20：GPIO 上升沿中断 + ISR 忙等逐 bit 测高（回归 v16 稳定框架）
+// （替代 RMT RX —— ESP32-C3 的 RMT 每通道内存上限 64 符号，长帧续接不可靠）
 //
-// 原理：WS2812 信号严格"高→低→高→低"交替（每 bit = 1 个高 + 1 个低）。
-// ANYEDGE 中断下，每 2 个边沿 = 1 bit：第 1 个边沿记录时刻（高开始），
-// 第 2 个边沿用「时刻差 - 高起点」得到该 bit 的高电平时长
-// （高 800ns=1 / 高 400ns=0，阈值 600ns）。
+// 为什么不用"双沿/ANYEDGE 状态机"（v17/v18/v19 已实测失败）：
+//   GPIO4 上的 WS2812 信号存在边沿抖动/重复触发，ANYEDGE 状态机对每个边沿
+//   都做交替配对，抖动边沿使状态错乱 → 永远解不出 bit。而"上升沿触发 +
+//   ISR 忙等锁定时序"对抖动边沿钝化（忙等期间锁存、帧头不可靠弃帧），
+//   v16 实测可稳定解出 32 颗/帧。
 //
-// 帧头对齐：帧间空闲低电平（reset ≥50µs / 帧间 10~20ms）后，WS2812 帧
-// 必然以"低→高"上升沿开始（bit1）。因此：距最后边沿 >2ms 时，下一个边沿
-// 强制视为帧头上升沿并重置累积 → 每帧重新同步，不依赖读电平判方向。
+// 颜色修复（相对 v16）：第一个 bit 阈值从 600ns 降为 250ns。
+//   忙等方案测的是"剩余高电平"（中断进入延迟已吃掉 bit 开头），
+//   bit1 完整 800ns 只剩 800-D（D≈150~500ns），600ns 阈值会把 bit1 误判成 0
+//   → 每帧首 LED 颜色错。250ns 阈值在 D∈(150,550) 区间内 bit0/bit1 均判对。
 //
-// 中断丢失容错：偶发丢边沿会导致本帧错位（颜色偶乱），但每帧帧头重新同步，
-// 下一帧即恢复。ISR 前缀仅 cycle 读取（~200ns），远小于 400ns 最短 bit。
-// 帧完成：最后边沿后 >2ms 无活动（主循环判定并取帧）。
+// 帧尾：低电平持续 > 20µs（reset ≥50µs）→ 帧完成。
+// 帧头不可靠（剩余高 <200ns）→ 弃帧且【保留上一帧完成状态】（防丢帧）。
 // ============================================================
 
 #define FC_GPIO_BIT    (1u << 4)      // GPIO4
 // 160MHz 主频：1 cycle = 6.25ns
-#define FC_BIT_THRESHOLD_CYC 96       // 高电平 ≥600ns 判 1（bit1 高 800ns / bit0 高 400ns）
-#define FC_FRAME_IDLE_CYC   320000    // 2ms @160MHz：帧内边沿间隔 ≤850ns，2ms 远大于帧尾 reset
-#define FC_ABNORMAL_HI_CYC  256       // 高时长 >1.6µs 视为噪声/异常，忽略该 bit
+#define FC_BIT_THRESHOLD_CYC     96   // 后续 bit 判别阈值 600ns（bit1 800ns / bit0 400ns）
+#define FC_FIRST_BIT_THRESHOLD_CYC 40 // 帧头第一个 bit 阈值 250ns（剩余高，已含中断延迟损耗）
+#define FC_RESET_TIMEOUT_CYC 3200     // 帧尾/帧间判定 20µs
+#define FC_BIT_MIN_CYC  32            // 帧头剩余高下限 200ns：低于此视为锁存/抖动误触发，弃帧
 
 // ---------- ISR 与主循环共享 ----------
 static portMUX_TYPE s_rxLock = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t s_riseCyc = 0;    // 当前 bit 高起点时刻（cycle）
-static volatile bool     s_expectRise = true; // 状态机：期望上升沿（帧头对齐后交替）
 static volatile uint32_t s_swBits = 0;     // 累积 bit（GRB 高位在前）
 static volatile uint8_t  s_swBitCnt = 0;
 static volatile RGB      s_swLeds[FC_MAX_LEDS];
 static volatile int      s_swLedCnt = 0;
-static volatile uint32_t s_swLastCyc = 0;  // 最后边沿时刻（cycle，帧判定用）
+static volatile bool     s_swFrameDone = false;
 
 // 诊断统计
 volatile uint32_t g_rxFrames = 0;
 volatile uint32_t g_rxLastLeds = 0;
-volatile uint32_t g_rxDone = 0;      // 软件解码：帧头（新帧）次数
+volatile uint32_t g_rxDone = 0;      // 软件解码：确认新帧（帧头可靠）次数
 volatile uint32_t g_rxSyms = 0;      // 软件解码：累计 bit 数
-volatile uint32_t g_rxBitLike = 0;   // 边沿间隔 ∈[40,140]cycle（真 WS2812 bit 候选）
-volatile uint32_t g_rxMid = 0;       // 边沿间隔 ∈(140,256]cycle（边缘/异常半周期）
-volatile uint32_t g_rxDrop = 0;      // 边沿间隔 >256cycle（异常高/噪声）
-volatile uint32_t g_rxFrameEnd = 0;  // 软件解码：主循环取帧次数
-volatile uint32_t g_rxLedAtEnd = 0;  // 软件解码：最近取帧的灯数
+volatile uint32_t g_rxBitLike = 0;   // 帧头可靠进入次数（bitLike 复用为"有效帧头"计数）
+volatile uint32_t g_rxMid = 0;       // 软件解码：帧头不可靠弃帧数
+volatile uint32_t g_rxDrop = 0;      // 软件解码：锁存/抖动误触发（未进帧头测量）次数
+volatile uint32_t g_rxFrameEnd = 0;  // 软件解码：ISR 置"帧完成"次数
+volatile uint32_t g_rxLedAtEnd = 0;  // 软件解码：最近一次帧完成时的灯数
 static esp_err_t s_rxErr = ESP_OK;
 static bool s_rxSwInit = false;
 
@@ -84,42 +81,59 @@ static inline void IRAM_ATTR swPushBit(bool one) {
     g_rxSyms = (uint32_t)(g_rxSyms + 1);
 }
 
-// ---------- GPIO 任意边沿中断（状态机，纯 cycle，极短） ----------
-static void IRAM_ATTR fcEdgeIsr(void* arg) {
+// ---------- GPIO 上升沿中断：一次中断忙等收完整帧 ----------
+static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
-    uint32_t cyc = esp_cpu_get_cycle_count();
 
-    // 帧间空闲（距最后边沿 >2ms）后的边沿：帧间低电平 → WS2812 帧必以
-    // 上升沿开始 → 强制作为新帧帧头（重置累积，期望下一次是下降沿）
-    if (cyc - s_swLastCyc > FC_FRAME_IDLE_CYC) {
-        s_swBits = 0;
-        s_swBitCnt = 0;
-        s_swLedCnt = 0;
-        s_riseCyc = cyc;          // 帧头上升沿：记录 bit1 高起点
-        s_expectRise = false;     // 下一期望：下降沿
-        g_rxDone = (uint32_t)(g_rxDone + 1);
-        s_swLastCyc = cyc;
+    // 测量帧头 bit 的剩余高电平（ISR 代码开始到变低），带超时：
+    // 20µs 不变低 = 帧间空闲高 / 抖动误触发 → 保留上一帧状态直接返回
+    uint32_t a0 = esp_cpu_get_cycle_count();
+    while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
+        if ((esp_cpu_get_cycle_count() - a0) > FC_RESET_TIMEOUT_CYC) {
+            g_rxDrop = (uint32_t)(g_rxDrop + 1); // 帧间高/误触发：不动状态
+            return;
+        }
+    }
+    uint32_t firstHi = esp_cpu_get_cycle_count() - a0;
+    if (firstHi < FC_BIT_MIN_CYC) {
+        g_rxMid = (uint32_t)(g_rxMid + 1); // 锁存/抖动误触发（进入时电平已低）：保留上一帧状态
         return;
     }
 
-    if (s_expectRise) {
-        s_riseCyc = cyc;
-        s_expectRise = false;
-    } else {
-        uint32_t hi = cyc - s_riseCyc;
-        s_expectRise = true;
-        if (hi < 40) {
-            g_rxMid = (uint32_t)(g_rxMid + 1);          // 太短（<250ns）：噪声
-        } else if (hi <= 140) {
-            g_rxBitLike = (uint32_t)(g_rxBitLike + 1);  // 真 WS2812 bit 候选（400~875ns）
-            swPushBit(hi > FC_BIT_THRESHOLD_CYC);
-        } else if (hi <= 256) {
-            g_rxMid = (uint32_t)(g_rxMid + 1);          // 边缘（875ns~1.6µs）
-        } else {
-            g_rxDrop = (uint32_t)(g_rxDrop + 1);        // 异常（>1.6µs）：噪声/错误信号
+    // 确认是真新帧：清累积
+    s_swBits = 0;
+    s_swBitCnt = 0;
+    s_swLedCnt = 0;
+    s_swFrameDone = false;
+    g_rxDone = (uint32_t)(g_rxDone + 1);
+    g_rxBitLike = (uint32_t)(g_rxBitLike + 1);
+
+    // 帧头第一个 bit：用低阈值（250ns）判别（剩余高已含中断延迟损耗）
+    swPushBit(firstHi > FC_FIRST_BIT_THRESHOLD_CYC);
+
+    // 连续测量后续 bit：忙等"变高→变低"交替，标准阈值 600ns
+    while (1) {
+        uint32_t w0 = esp_cpu_get_cycle_count();
+        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
+            if ((esp_cpu_get_cycle_count() - w0) > FC_RESET_TIMEOUT_CYC) {
+                s_swFrameDone = true;
+                g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
+                g_rxLedAtEnd = (uint32_t)s_swLedCnt;
+                return;   // 帧尾 reset（低电平超时）
+            }
         }
+        uint32_t h0 = esp_cpu_get_cycle_count();
+        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
+            if ((esp_cpu_get_cycle_count() - h0) > FC_RESET_TIMEOUT_CYC) {
+                s_swFrameDone = true;
+                g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
+                g_rxLedAtEnd = (uint32_t)s_swLedCnt;
+                return;   // 帧间空闲高电平超时（防卡死）
+            }
+        }
+        uint32_t h1 = esp_cpu_get_cycle_count();
+        swPushBit((h1 - h0) > FC_BIT_THRESHOLD_CYC);
     }
-    s_swLastCyc = cyc;
 }
 
 // ---------- 初始化 ----------
@@ -129,21 +143,20 @@ void fcInputInit() {
     return;
 #endif
     s_rxErr = ESP_OK;
-    // 上拉：未接飞控时 GPIO4 为高电平 → 无边沿 → 中断安静，无风暴
     gpio_config_t cfg = {};
     cfg.pin_bit_mask = (1ULL << 4);
     cfg.mode = GPIO_MODE_INPUT;
-    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;   // 未接飞控时高电平 → 无边沿 → 无风暴
     cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    cfg.intr_type = GPIO_INTR_ANYEDGE;
+    cfg.intr_type = GPIO_INTR_POSEDGE;     // 上升沿触发 + 忙等锁定
     gpio_config(&cfg);
 
-    esp_err_t e = gpio_install_isr_service(0); // 全工程唯一 ISR 服务
+    esp_err_t e = gpio_install_isr_service(0);
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) {
         s_rxErr = e;
         return;
     }
-    e = gpio_isr_handler_add(GPIO_NUM_4, fcEdgeIsr, NULL);
+    e = gpio_isr_handler_add(GPIO_NUM_4, fcRiseIsr, NULL);
     if (e != ESP_OK) {
         s_rxErr = e;
         return;
@@ -152,15 +165,12 @@ void fcInputInit() {
 }
 
 // ---------- 轮询：取完整帧 ----------
-// 帧完成判定：已收到 ≥1 颗灯 且 距最后边沿 >2ms（帧尾 reset/帧间空闲）
 bool pollFcInput(FcFrame* out) {
 #if FC_INPUT_ENABLE == 0
     (void)out;
     return false;
 #endif
-    if (s_swLedCnt == 0) return false;
-    uint32_t nowCyc = esp_cpu_get_cycle_count();
-    if (nowCyc - s_swLastCyc < FC_FRAME_IDLE_CYC) return false; // 帧仍在进行
+    if (!s_swFrameDone) return false;
 
     portENTER_CRITICAL(&s_rxLock);
     int n = (int)s_swLedCnt;
@@ -174,7 +184,7 @@ bool pollFcInput(FcFrame* out) {
     s_swLedCnt = 0;
     s_swBits = 0;
     s_swBitCnt = 0;
-    s_expectRise = true;
+    s_swFrameDone = false;
     portEXIT_CRITICAL(&s_rxLock);
 
     out->count = n;
