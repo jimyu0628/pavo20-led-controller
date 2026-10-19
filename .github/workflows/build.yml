@@ -33,11 +33,30 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 缓存 PlatformIO 平台/工具链/缓存目录：避免每次重新下载 espressif32 平台包
+      # （HTTPClientError 是下载超时；缓存命中后不再下载）
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/platforms
+            ~/.platformio/packages
+            ~/.cache/pip
+          key: ${{ runner.os }}-pio-v1
+
       - name: Install PlatformIO
         run: pip install --quiet platformio
 
+      # 构建带重试：平台包下载偶发失败时自动重试
       - name: Build firmware
-        run: pio run
+        run: |
+          for i in 1 2 3 4; do
+            pio run && break
+            echo "pio run failed (attempt $i), retrying..."
+            sleep 8
+          done
+          pio run
 
       - name: List build outputs
         run: ls -laR .pio/build/esp32-c3 | head -80
