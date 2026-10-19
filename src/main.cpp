@@ -249,7 +249,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v22 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v23 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,

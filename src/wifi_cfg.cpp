@@ -189,7 +189,17 @@ static void wifiStopAll() {
 
 // ---------- 初始化 ----------
 void wifiCfgInit() {
-    esp_netif_init(); // 必须先初始化 netif 层，否则 create_default_wifi_ap 报 INVALID_STATE
+    // IDF 初始化顺序（缺一不可，否则 create_default_wifi_ap 报 INVALID_STATE）：
+    // 1) esp_netif_init() 网络接口层
+    // 2) esp_event_loop_create_default() 默认事件循环（WiFi 事件注册必需）
+    // 3) esp_netif_create_default_wifi_ap() 创建 AP 接口
+    // 4) esp_wifi_init() 初始化 WiFi
+    esp_netif_init();
+    esp_err_t el = esp_event_loop_create_default();
+    if (el != ESP_OK && el != ESP_ERR_INVALID_STATE) { // 已存在则忽略
+        printf("[WiFi] event loop FAILED 0x%x\n", el);
+        return;
+    }
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
