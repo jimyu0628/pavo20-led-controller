@@ -186,30 +186,23 @@ static void wifiStopAll() {
     esp_wifi_stop();
     esp_wifi_deinit();
     s_wifiUp = false;
+    s_cfgStr[0] = 0;
     printf("[WiFi] 热点已关闭\n");
 }
 
 // ---------- 初始化 ----------
 void wifiCfgInit() {
-    // IDF 初始化顺序（缺一不可，否则 create_default_wifi_ap 报 INVALID_STATE）：
-    // 1) esp_netif_init() 网络接口层
-    // 2) esp_event_loop_create_default() 默认事件循环（WiFi 事件注册必需）
-    // 3) esp_netif_create_default_wifi_ap() 创建 AP 接口
-    // 4) esp_wifi_init() 初始化 WiFi
-    esp_netif_init();
-    esp_err_t el = esp_event_loop_create_default();
-    if (el != ESP_OK && el != ESP_ERR_INVALID_STATE) { // 已存在则忽略
-        printf("[WiFi] event loop FAILED 0x%x\n", el);
-        return;
-    }
-    esp_netif_create_default_wifi_ap();
+    // IDF 初始化顺序（缺一不可）：netif → event_loop → AP netif → wifi_init
+    // 每一步收集返回码进 s_cfgStr（心跳每秒可见；启动 printf 可能被 USB 串口吞掉）
+    esp_err_t e1 = esp_netif_init();
+    esp_err_t e2 = esp_event_loop_create_default();
+    if (e2 == ESP_ERR_INVALID_STATE) e2 = ESP_OK; // 已存在视为正常
+    esp_netif_t* apn = esp_netif_create_default_wifi_ap();
+    esp_err_t eA = apn ? ESP_OK : ESP_FAIL;
 
     wifi_init_config_t ic = WIFI_INIT_CONFIG_DEFAULT();
-    if (esp_wifi_init(&ic) != ESP_OK) {
-        printf("[WiFi] init FAILED\n");
-        return;
-    }
-    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifiEvt, NULL);
+    esp_err_t e3 = esp_wifi_init(&ic);
+    esp_err_t e4 = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifiEvt, NULL);
 
     wifi_config_t wc = {};
     strncpy((char*)wc.ap.ssid, WIFI_SSID, sizeof(wc.ap.ssid));
@@ -217,31 +210,28 @@ void wifiCfgInit() {
     wc.ap.channel = WIFI_CHANNEL;
     wc.ap.max_connection = WIFI_MAX_CONN;
     wc.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    esp_err_t e5 = esp_wifi_set_mode(WIFI_MODE_AP);
+    esp_err_t e6 = esp_wifi_set_config(WIFI_IF_AP, &wc);
+    esp_err_t e7 = esp_wifi_start();
 
-    if (esp_wifi_set_mode(WIFI_MODE_AP) != ESP_OK ||
-        esp_wifi_set_config(WIFI_IF_AP, &wc) != ESP_OK) {
-        printf("[WiFi] set config FAILED\n");
-        return;
-    }
-    esp_err_t rs = esp_wifi_start();
-    if (rs != ESP_OK) {
-        printf("[WiFi] start FAILED 0x%x\n", rs);
-        return;
-    }
-    // 诊断：回读实际配置与 AP IP（缓存供心跳显示，启动 printf 可能被串口时序吞掉）
     wifi_config_t cur = {};
-    if (esp_wifi_get_config(WIFI_IF_AP, &cur) == ESP_OK)
-        snprintf(s_cfgStr, sizeof(s_cfgStr), "%s", (const char*)cur.ap.ssid);
-    esp_netif_t* apn = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    if (apn) {
-        esp_netif_ip_info_t ip;
-        if (esp_netif_get_ip_info(apn, &ip) == ESP_OK) {
-            char ib[16];
-            snprintf(ib, sizeof(ib), IPSTR, IP2STR(&ip.ip));
-            snprintf(s_cfgStr + strlen(s_cfgStr), sizeof(s_cfgStr) - strlen(s_cfgStr),
-                     "/%s", ib);
-        }
+    esp_err_t e8 = esp_wifi_get_config(WIFI_IF_AP, &cur);
+    esp_netif_ip_info_t ip;
+    esp_err_t e9 = ESP_FAIL;
+    if (apn && esp_netif_get_ip_info(apn, &ip) == ESP_OK) e9 = ESP_OK;
+
+    if (e1 != ESP_OK || e2 != ESP_OK || eA != ESP_OK || e3 != ESP_OK ||
+        e4 != ESP_OK || e5 != ESP_OK || e6 != ESP_OK || e7 != ESP_OK) {
+        snprintf(s_cfgStr, sizeof(s_cfgStr), "ERR %d/%d/%d/%d/%d/%d/%d/%d",
+                 e1, e2, eA, e3, e4, e5, e6, e7);
+        printf("[WiFi] init FAILED: %s\n", s_cfgStr);
+        return;
     }
+    char ib[16] = "-";
+    if (e9 == ESP_OK) snprintf(ib, sizeof(ib), IPSTR, IP2STR(&ip.ip));
+    snprintf(s_cfgStr, sizeof(s_cfgStr), "ok %s/%s%s",
+             (e8 == ESP_OK) ? (const char*)cur.ap.ssid : "?",
+             ib, (e8 != ESP_OK) ? " cfgE" : (e9 != ESP_OK) ? " ipE" : "");
     printf("[WiFi] AP up: %s\n", s_cfgStr);
     s_wifiUp = true;
     s_startUs = esp_timer_get_time();
@@ -258,7 +248,7 @@ void wifiCfgInit() {
         httpd_register_uri_handler(s_httpd, &u_state);
         httpd_register_uri_handler(s_httpd, &u_set);
         httpd_register_uri_handler(s_httpd, &u_off);
-        printf("[WiFi] 热点 RGBled 已开启（密码 12345678），30s 无连接自动关闭\n");
+        printf("[WiFi] 热点 RGBled 已开启（密码 12345678），5 分钟无连接自动关闭\n");
     } else {
         printf("[WiFi] httpd FAILED\n");
         s_httpd = NULL;
@@ -272,7 +262,7 @@ int wifiCfgState() {
 }
 
 const char* wifiCfgStr() {
-    return s_wifiUp ? s_cfgStr : "";
+    return s_cfgStr;
 }
 
 // ---------- 每秒判定关闭 ----------
