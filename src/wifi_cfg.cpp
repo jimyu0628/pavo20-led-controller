@@ -244,6 +244,12 @@ void wifiCfgInit() {
     }
 }
 
+// ---------- 状态查询 ----------
+int wifiCfgState() {
+    if (!s_wifiUp) return 0;
+    return s_everConnected ? 2 : 1;
+}
+
 // ---------- 每秒判定关闭 ----------
 void wifiCfgPoll(uint32_t nowMs) {
     (void)nowMs;
