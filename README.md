@@ -2,9 +2,9 @@
 
 （ESP32-C3 SuperMini · BETAFPV PAVO 20 Pro）
 
-复刻「幻彩灯带使用说明书」控制板的全部功能：接收飞控 LED 信号、10 种模式、单键操作、灯数标定、断电记忆。硬件仅 **1 个 5V 降压模块 + 1 颗电容 + 板载 BOOT 键**，无外接按键、无电平转换。
+幻彩灯带控制板为穿越机设计，轻量化、多功能。仅使用ESP32-C3 SuperMini，可以控制2812 LED灯带，并可以连接BetaFlight飞控输出的LED strip信号脚。全部功能：接收飞控 LED 信号、10 种模式、单键操作、灯数标定、断电记忆。硬件仅 **ESP32-C3 SuperMini**，无外接按键、无电平转换，工作电压 5V 。
 
-> 固件为 **ESP-IDF 原生独立固件**（非 WLED、非 Arduino），零第三方依赖，无 WiFi / 无网页控制。
+> 固件为 **ESP-IDF 原生独立固件**（非 WLED、非 Arduino），零第三方依赖，Ver 16 无 WiFi / 无网页控制。V28 有热点，可网页控制。
 
 ---
 
@@ -13,8 +13,6 @@
 | 器件 | 规格 | 备注 |
 |---|---|---|
 | 主控 | ESP32-C3 SuperMini | 板载 USB 串口 + BOOT 键 |
-| 降压模块 | DC-DC 5V / 3A 起 | 输入 6~18V（2~4S），输出 5V |
-| 滤波电容 | 1 颗（如 470µF/10V） | 灯带供电输入侧 |
 | 灯带 | WS2812B COB 3mm，100 灯/米 | 长 ≤55cm → 55 颗 |
 | 信号线 | 3 根（5V / GND / DATA） | 尽量短，与电机线分离 |
 
@@ -22,7 +20,6 @@
 
 | 来源 | 接到 |
 |---|---|
-| 电池 3S（6~18V） | DC-DC 模块 IN+ / IN- |
 | DC-DC 输出 **5V** | SuperMini **5V** + 灯带 **5V** |
 | DC-DC **GND** | SuperMini **GND** + 灯带 **GND** + 飞控 **GND** |
 | 飞控 LED 焊盘（3.3V 信号，T6 脚） | SuperMini **GPIO4** |
@@ -53,7 +50,7 @@
 2. **Connect** 选择 SuperMini 串口（按住 BOOT 再插 USB 更稳）；
 3. 加载 **`merged.bin`**，**Program** 等待完成。
 
-> **关键**：C3 刷机**只保留一个槽**——在 "Erase Flash" 后 Program `merged.bin`，不要使用页面默认的 0x1000/0x8000/0xe000/0x10000 四个槽布局（那是 ESP32 经典版用的）；`merged.bin` 已包含 bootloader+分区+应用，刷一次即可。
+> **关键**：C3 刷机**只保留一个槽 0x0000 **——在 "Erase Flash" 后 Program `merged.bin`，不要使用页面默认的 0x1000/0x8000/0xe000/0x10000 四个槽布局（那是 ESP32 经典版用的）；`merged.bin` 已包含 bootloader+分区+应用，刷一次即可。
 
 ## 六、串口监视（看日志）
 
