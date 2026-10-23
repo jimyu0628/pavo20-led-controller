@@ -5,13 +5,25 @@
 //
 // v32.5 针对「SpeedyBee 连接 2 秒后断开（MSP 握手无回复）」的加固：
 //   1) notify 按 (MTU-3) 分片——原来一次塞 256 字节，超过 MTU 会返回
-//      BLE_HS_EMSGSIZE 且整包丢弃，App 永远等不到回复（最可能的真凶）
+//      BLE_HS_EMSGSIZE 且整包丢弃，App 永远等不到回复
 //   2) 跟踪 CCCD 订阅状态（BLE_GAP_EVENT_SUBSCRIBE），未订阅不发 notify
 //   3) notify 成功/失败分别计数并记录最后一次错误码，心跳直接看得到
 //   4) 主动协商 MTU（247），并记录协商结果
 //   5) 连接后请求更快的连接参数，WiFi/BLE 共存时不易被 supervision 超时踢掉
 //   6) 开机 5s + 每次断开后自动「MSP 探测」：固件自己发一帧 MSP_API_VERSION，
 //      看飞控到底回不回，一条心跳就能分清是飞控侧还是固件侧的问题
+//
+// v32.6 = 2 秒断开真正的根因：NUS 两个特征的 UUID 装反了
+//   标准 NUS：...02 = RX（手机写进来）、...03 = TX（通知给手机）
+//   v32.5 之前把 ...03 注册成「只写」、把 ...02 注册成「只读+通知」，于是：
+//     - App 往 ...02 写 MSP 请求 → 该特征无 WRITE 属性 → ATT 错误，字节进不来
+//       （心跳里 tx=0/s，飞控收不到任何请求）
+//     - App 去订阅 ...03 的 CCCD → 该特征无 NOTIFY 属性、没有 CCCD 描述符
+//       → 订阅失败（心跳里 sub=0）
+//     - App 等 2s 没有任何 MSP 回应 → 自己断开，reason=0x13 Remote User Terminated
+//   实测日志完全对上（mtu=247 说明服务发现正常、probe=ok 说明 UART1 正常）。
+//   现按标准改正，并额外给写特征也加上 NOTIFY、按实际订阅的句柄发通知，
+//   兼容把收发放进同一个特征的 App 变体。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -36,8 +48,10 @@
 #define NUS_MTU_WANT  247  // 期望 MTU（247 -> notify 载荷 244）
 
 static volatile int s_connected = 0;
-static uint16_t s_connHandle = 0; // 当前连接句柄（通知用）
-static uint16_t s_txHandle = 0;
+static uint16_t s_connHandle = 0;   // 当前连接句柄（通知用）
+static uint16_t s_wrHandle = 0;     // 写特征句柄（NUS RX，手机->飞控）
+static uint16_t s_ntHandle = 0;     // 通知特征句柄（NUS TX，飞控->手机）
+static volatile uint16_t s_subHandle = 0; // 实际被订阅通知的句柄（0=未订阅）
 static volatile int s_initErr = 0;   // BLE 初始化失败标记
 static volatile int s_advOk = 0;     // 广播是否成功发出
 static volatile uint32_t s_uartTx = 0; // 透传：手机->飞控 累计字节
@@ -61,22 +75,27 @@ const char* bleUartDiag(void) {
     static volatile int idx = 0;
     int i = idx;
     idx = 1 - i;
-    snprintf(b[i], sizeof(b[i]), "sub=%d mtu=%d nf=%u/%u e%d probe=%s",
-             s_sub, s_mtu, (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr,
+    snprintf(b[i], sizeof(b[i]), "sub=%d@%u mtu=%d nf=%u/%u e%d probe=%s",
+             s_sub, (unsigned)s_subHandle, s_mtu,
+             (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr,
              s_probe < 0 ? "?" : (s_probe ? "ok" : "fail"));
     return b[i];
 }
 
-// NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
+// NUS UUID：6E400001-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
+// 标准定义必须严格遵守：
+//   6E400002 = RX ：手机写进来的数据（本机 -> 飞控）
+//   6E400003 = TX ：通知给手机的数据（飞控 -> 本机）
+// v32.5 及以前这两个后缀写反了，导致 App 写不进、也订阅不上（见文件头说明）
 static const ble_uuid128_t nus_svc_uuid =
     BLE_UUID128_INIT(0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
                      0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x01, 0x40, 0x6E); // 服务
-static const ble_uuid128_t nus_rx_uuid =
+static const ble_uuid128_t nus_wr_uuid =
     BLE_UUID128_INIT(0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-                     0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x03, 0x40, 0x6E); // 写（手机->飞控）
-static const ble_uuid128_t nus_tx_uuid =
+                     0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x02, 0x40, 0x6E); // RX 写（手机->飞控）
+static const ble_uuid128_t nus_nt_uuid =
     BLE_UUID128_INIT(0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
-                     0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x02, 0x40, 0x6E); // 通知（飞控->手机）
+                     0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x03, 0x40, 0x6E); // TX 通知（飞控->手机）
 
 const char* bleUartState(void) {
     if (s_initErr) return "ble err";
@@ -86,8 +105,12 @@ const char* bleUartState(void) {
 }
 
 // ---------------- 分片通知（修复 MTU 超限整包丢弃） ----------------
+// 发到「实际被订阅的句柄」；万一没收到订阅事件，退回标准 TX 句柄试一次，
+// 失败会计进 nf 计数，不会变成静默黑洞
 static void notifyBytes(const uint8_t* p, int n) {
-    if (!s_connected || s_connHandle == 0 || s_txHandle == 0) return;
+    if (!s_connected || s_connHandle == 0) return;
+    uint16_t h = s_subHandle ? s_subHandle : s_ntHandle;
+    if (h == 0) return;
     int maxPayload = s_mtu - 3;
     if (maxPayload < 20) maxPayload = 20; // ATT 默认最小值兜底
     int off = 0;
@@ -96,7 +119,7 @@ static void notifyBytes(const uint8_t* p, int n) {
         if (chunk > maxPayload) chunk = maxPayload;
         struct os_mbuf* om = ble_hs_mbuf_from_flat(p + off, chunk);
         if (!om) { s_nfErr++; s_nfLastErr = -1; return; }
-        int rc = ble_gatts_notify_custom(s_connHandle, s_txHandle, om);
+        int rc = ble_gatts_notify_custom(s_connHandle, h, om);
         if (rc != 0) {
             // 未订阅(EDONE)/缓冲区满(ENOMEM)/超长(EMSGSIZE) 都记下来
             s_nfErr++;
@@ -109,7 +132,7 @@ static void notifyBytes(const uint8_t* p, int n) {
 }
 
 // ---------------- GATT 特征回调 ----------------
-static int nus_rx_cb(uint16_t conn_handle, uint16_t attr_handle,
+static int nus_wr_cb(uint16_t conn_handle, uint16_t attr_handle,
                      struct ble_gatt_access_ctxt* ctxt, void* arg) {
     (void)conn_handle; (void)attr_handle; (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
@@ -125,7 +148,7 @@ static int nus_rx_cb(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-static int nus_tx_cb(uint16_t conn_handle, uint16_t attr_handle,
+static int nus_nt_cb(uint16_t conn_handle, uint16_t attr_handle,
                      struct ble_gatt_access_ctxt* ctxt, void* arg) {
     (void)conn_handle; (void)attr_handle; (void)ctxt; (void)arg;
     return 0; // 只用于通知，读不返回数据
@@ -136,13 +159,18 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &nus_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]){
-            {.uuid = &nus_rx_uuid.u,
-             .access_cb = nus_rx_cb,
-             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP},
-            {.uuid = &nus_tx_uuid.u,
-             .access_cb = nus_tx_cb,
+            // NUS RX（...02）：手机写 -> 飞控。同时也开 NOTIFY，
+            // 兼容把收发放进同一个特征的 App 变体
+            {.uuid = &nus_wr_uuid.u,
+             .access_cb = nus_wr_cb,
+             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
+                      BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_wrHandle},
+            // NUS TX（...03）：飞控 -> 手机通知
+            {.uuid = &nus_nt_uuid.u,
+             .access_cb = nus_nt_cb,
              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-             .val_handle = &s_txHandle},
+             .val_handle = &s_ntHandle},
             {0}
         }
     },
@@ -200,7 +228,9 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             s_connected = 1;
             s_connHandle = event->connect.conn_handle;
             s_sub = 0;
-            printf("[BLE] 已连接\n");
+            s_subHandle = 0;
+            printf("[BLE] 已连接（wr=%u nt=%u）\n",
+                   (unsigned)s_wrHandle, (unsigned)s_ntHandle);
             // 请求更快的连接参数：WiFi AP 同时在跑（单射频分时），
             // 连接间隔太大会让 MSP 回复迟到甚至被 supervision 超时踢掉
             struct ble_gap_upd_params up = {0};
@@ -218,6 +248,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         s_connected = 0;
         s_connHandle = 0;
         s_sub = 0;
+        s_subHandle = 0;
         printf("[BLE] 断开（reason=0x%x），重新广播\n", event->disconnect.reason);
         adv_start();
         // App 走了再探测，避免干扰握手
@@ -230,12 +261,24 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         s_mtu = event->mtu.value;
         printf("[BLE] MTU=%d（notify 载荷 %d）\n", s_mtu, s_mtu - 3);
         break;
-    case BLE_GAP_EVENT_SUBSCRIBE:
-        if (event->subscribe.attr_handle == s_txHandle) {
-            s_sub = event->subscribe.cur_notify ? 1 : 0;
-            printf("[BLE] 通知订阅=%d\n", s_sub);
+    case BLE_GAP_EVENT_SUBSCRIBE: {
+        uint16_t h = event->subscribe.attr_handle;
+        int on = event->subscribe.cur_notify ? 1 : 0;
+        // 哪个句柄被订阅就发到哪个：优先标准 TX(...03)，其次 RX(...02)
+        if (on) {
+            if (h == s_ntHandle || s_subHandle == 0) {
+                s_subHandle = h;
+                s_sub = 1;
+            }
+        } else if (h == s_subHandle) {
+            s_subHandle = 0;
+            s_sub = 0;
         }
+        printf("[BLE] 订阅事件 h=%u notify=%d  (wr=%u nt=%u) -> sub=%d@%u\n",
+               (unsigned)h, on, (unsigned)s_wrHandle, (unsigned)s_ntHandle,
+               s_sub, (unsigned)s_subHandle);
         break;
+    }
     default:
         break;
     }
