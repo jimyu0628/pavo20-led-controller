@@ -28,6 +28,10 @@
 #define WIFI_PASS       "12345678"
 #define WIFI_CHANNEL    1
 #define WIFI_MAX_CONN   4
+
+// 全局状态（需在 dnsTask / sendState 等使用处之前定义）
+static char s_bootInfo[512] = "n/a";     // 开机信息（Web 调试区显示）
+static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
 #define OFF_NO_HTTP_MS  300000  // 关闭网页/无操作 5 分钟后关（v25 从 60s 延长）
 #define OFF_NO_STA_MS   300000  // 上电后 5 分钟无手机连接则关（v25 从 30s 延长）
 
@@ -375,9 +379,6 @@ void wifiCfgInit() {
 }
 
 // ---------- 状态查询 ----------
-static char s_bootInfo[512] = "n/a";
-static volatile int s_dnsOk = 0;
-
 void wifiCfgSetBootInfo(const char* s) {
     strncpy(s_bootInfo, s, sizeof(s_bootInfo) - 1);
     s_bootInfo[sizeof(s_bootInfo) - 1] = 0;
