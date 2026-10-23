@@ -56,11 +56,12 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
 static void touchHttp() { s_lastHttpUs = esp_timer_get_time(); }
 
 static void sendState(httpd_req_t* req) {
-    char buf[256];
+    char buf[640];
     snprintf(buf, sizeof(buf),
-             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\"}",
+             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\",\"dns\":%d,\"boot\":\"%s\"}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
-             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(), bleUartState());
+             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(), bleUartState(),
+             wifiCfgDnsOk(), wifiCfgBootInfo());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_sendstr(req, buf);
 }
@@ -169,13 +170,13 @@ var C=["白","红","黄","蓝","绿","青","品红","关"];
 var CS=["#fff","#f33","#ff3","#36f","#3f3","#0ff","#f3f","#000"];
 var S=["快","中","慢"];
 var B=["100%","75%","50%","25%"];
-var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:""};
+var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:"",dns:0,boot:""};
 
 function render(){
  var ve=document.getElementById("ver"); if(ve)ve.textContent=st.v;
  document.getElementById("st").textContent =
   "模式："+M[st.mode]+" · 颜色："+C[st.color]+" · 速度："+S[st.speed]+
-  " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"")+" · 固件 "+st.v;
+  " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"");
  dbgRefresh();
  var c=document.getElementById("cnt"); if(c)c.value=st.calib;
  var mm=document.getElementById("modes"); mm.innerHTML="";
@@ -205,7 +206,9 @@ function dbgRefresh(){var d=document.getElementById("dbg");
  if(!d||d.style.display=="none")return;
  d.textContent="固件版本 : "+(st.v||"n/a")+
   "\nWiFi 状态 : "+(st.ws||"n/a")+
+  "\nDNS 劫持 : "+(st.dns?"ok":"fail/未启动")+
   "\nBLE 状态 : "+(st.ble||"n/a")+
+  "\n开机信息 : "+(st.boot||"n/a")+
   "\n模式/颜色/速度/亮度 : "+st.mode+"/"+st.color+"/"+st.speed+"/"+st.bright+
   "\nLED 数量 : "+st.calib+" 颗"+(st.cal?"（标定中）":"")+
   "\n心跳 : "+JSON.stringify(st);}
@@ -234,10 +237,12 @@ static void dnsTask(void* arg) {
     if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
         // 53 被占用：dhcps 可能已内置 DNS 应答，无需自建
         printf("[WiFi] dns bind fail (dhcps DNS likely active)\n");
+        s_dnsOk = 0;
         close(sock);
         vTaskDelete(NULL);
         return;
     }
+    s_dnsOk = 1;
     printf("[WiFi] DNS captive: 53 -> 192.168.4.1\n");
     char buf[512];
     for (;;) {
@@ -277,8 +282,9 @@ static esp_err_t handler_captive(httpd_req_t* req) {
         return ESP_OK;
     }
     touchHttp();
+    // 绝对地址重定向：手机探测逻辑按完整 URL 判断是否 captive（相对地址部分机型不弹窗）
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
     httpd_resp_sendstr(req, "");
     return ESP_OK;
 }
@@ -369,6 +375,16 @@ void wifiCfgInit() {
 }
 
 // ---------- 状态查询 ----------
+static char s_bootInfo[512] = "n/a";
+static volatile int s_dnsOk = 0;
+
+void wifiCfgSetBootInfo(const char* s) {
+    strncpy(s_bootInfo, s, sizeof(s_bootInfo) - 1);
+    s_bootInfo[sizeof(s_bootInfo) - 1] = 0;
+}
+const char* wifiCfgBootInfo() { return s_bootInfo; }
+int wifiCfgDnsOk() { return s_dnsOk; }
+
 int wifiCfgState() {
     if (!s_wifiUp) return 0;
     return s_everConnected ? 2 : 1;

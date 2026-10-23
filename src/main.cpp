@@ -282,6 +282,14 @@ extern "C" void app_main(void) {
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
            ledOutOk() ? "OK" : "FAIL", (unsigned)ledOutErr());
+    // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
+    char bi[512];
+    snprintf(bi, sizeof(bi),
+             "版本 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s",
+             otaVersion(), s_calibCount, currentRatio(), s_mode,
+             __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
+             ledOutOk() ? "OK" : "FAIL");
+    wifiCfgSetBootInfo(bi);
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
     uint32_t lastTxTotal = 0;

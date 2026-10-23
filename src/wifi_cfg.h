@@ -21,6 +21,13 @@ int wifiCfgState();
 // 热点诊断字符串（SSID/IP），供心跳显示；热点关闭时返回 ""
 const char* wifiCfgStr();
 
+// 开机信息（版本/灯数/模式等），串口错过启动日志时 Web 调试区可看
+void wifiCfgSetBootInfo(const char* s);
+const char* wifiCfgBootInfo();
+
+// DNS 劫持（captive portal）是否绑定成功：1=ok 0=fail/未启动
+int wifiCfgDnsOk();
+
 // ---- Web 设置接口（由 main.cpp 实现，读写主程序状态） ----
 int  webGetMode();
 int  webGetColor();
