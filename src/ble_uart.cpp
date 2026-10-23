@@ -93,6 +93,7 @@ static void adv_start(void) {
     struct ble_gap_adv_params adv = {0};
     struct ble_hs_adv_fields f = {0};
     const char* devName = "PavoLED";
+    f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
     f.name = (uint8_t*)devName;
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
