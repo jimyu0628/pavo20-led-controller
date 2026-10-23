@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static const char* OTA_VER = "v31"; // 与 main.cpp 版本头同步
+static const char* OTA_VER = "v32"; // 版本号唯一来源（心跳/网页/开机日志统一引用）
 
 const char* otaVersion() { return OTA_VER; }
 
