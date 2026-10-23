@@ -143,8 +143,7 @@ static void uart_rx_task(void* arg) {
 
 // ---------------- NimBLE 主机事件 ----------------
 static void on_sync(void) {
-    ble_hs_util_ensure_addr_type_default();
-    adv_start();
+    adv_start(); // 公共地址广播（C3 有出厂 MAC），无需地址类型推断
     printf("[BLE] 广播中：PavoLED（NUS 透传，等待 SpeedyBee App 连接）\n");
 }
 
