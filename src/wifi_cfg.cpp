@@ -11,6 +11,7 @@
 #include "lwip/sockets.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "ota.h"
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -54,11 +55,11 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
 static void touchHttp() { s_lastHttpUs = esp_timer_get_time(); }
 
 static void sendState(httpd_req_t* req) {
-    char buf[160];
+    char buf[192];
     snprintf(buf, sizeof(buf),
-             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d}",
+             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\"}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
-             webGetCalib(), webIsCalibrating() ? 1 : 0);
+             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_sendstr(req, buf);
 }
@@ -152,6 +153,9 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 <div class="card">
  <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi（需重启才能重新开启）</button>
 </div>
+<div class="card">
+ <button style="background:#1f3a52;border-color:#36c" onclick="location.href='/ota'">固件升级（WiFi OTA）</button>
+</div>
 <div id="toast"></div>
 
 <script>
@@ -160,12 +164,12 @@ var C=["白","红","黄","蓝","绿","青","品红","关"];
 var CS=["#fff","#f33","#ff3","#36f","#3f3","#0ff","#f3f","#000"];
 var S=["快","中","慢"];
 var B=["100%","75%","50%","25%"];
-var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0};
+var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v31"};
 
 function render(){
  document.getElementById("st").textContent =
   "模式："+M[st.mode]+" · 颜色："+C[st.color]+" · 速度："+S[st.speed]+
-  " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"");
+  " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"")+" · 固件 "+st.v;
  var c=document.getElementById("cnt"); if(c)c.value=st.calib;
  var mm=document.getElementById("modes"); mm.innerHTML="";
  for(var i=0;i<10;i++){var b=document.createElement("button");b.textContent=i+" "+M[i];
@@ -325,7 +329,8 @@ void wifiCfgInit() {
     s_lastHttpUs = s_startUs;
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 8;
+    hc.max_uri_handlers = 10; // 5 现有 + 2 OTA + 余量
+    hc.stack_size = 8192;     // OTA 升级 handler 需较大栈
     if (httpd_start(&s_httpd, &hc) == ESP_OK) {
         static const httpd_uri_t u_root  = {.uri="/",          .method=HTTP_GET, .handler=handler_root,  .user_ctx=NULL};
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
@@ -337,6 +342,7 @@ void wifiCfgInit() {
         httpd_register_uri_handler(s_httpd, &u_set);
         httpd_register_uri_handler(s_httpd, &u_off);
         httpd_register_uri_handler(s_httpd, &u_capt); // 通配放最后：精确路由优先
+        otaHttpdRegister(s_httpd);                    // /ota 上传页 + /api/ota
         printf("[WiFi] 热点 RGBled 已开启（密码 12345678），5 分钟无连接自动关闭\n");
     } else {
         printf("[WiFi] httpd FAILED\n");

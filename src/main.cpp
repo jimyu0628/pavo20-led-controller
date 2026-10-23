@@ -23,6 +23,7 @@
 #include "led_out.h"
 #include "button.h"
 #include "wifi_cfg.h"
+#include "esp_ota_ops.h"
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) {
@@ -251,6 +252,16 @@ void webApplyNow() {
 extern "C" void app_main(void) {
     nvsInit();
     loadPrefs();
+    // OTA：从备用分区启动后标记有效，防止下次重启自动回滚
+    const esp_partition_t* rp = esp_ota_get_running_partition();
+    if (rp) {
+        esp_ota_img_states_t ost;
+        if (esp_ota_get_state_partition(rp, &ost) == ESP_OK &&
+            ost == ESP_OTA_IMG_PENDING_VERIFY) {
+            esp_ota_mark_app_valid_cancel_rollback();
+            logMsg("[OTA] 新固件校验通过，已锁定\n");
+        }
+    }
     buttonInit();
     ledOutInit();
     fcInputInit();
@@ -263,7 +274,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v30 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v31 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,

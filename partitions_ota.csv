@@ -1,0 +1,9 @@
+# ESP32-C3 4MB flash · OTA 双分区布局
+# 与单分区版 merged.bin 地址一致：0x0 bootloader / 0x8000 partitions / 0x10000 app(ota_0)
+# ota_0 为出厂 app；首次 USB 刷 merged.bin 后即可正常启动；之后可用 WiFi OTA 升级
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+phy_init,   data, phy,     0xF000,   0x1000,
+ota_0,      app,  ota_0,   0x10000,  0x1D0000,
+ota_1,      app,  ota_1,   0x1E0000, 0x1D0000,
+otadata,    data, ota,     0x3B0000, 0x2000,
