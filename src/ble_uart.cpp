@@ -207,7 +207,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             up.itvl_min = 12;   // 15ms
             up.itvl_max = 24;   // 30ms
             up.latency = 0;
-            up.timeout = 400;   // 4s 监督超时
+            up.supervision_timeout = 400; // 4s 监督超时（单位 10ms）
             ble_gap_update_params(event->connect.conn_handle, &up);
         } else {
             s_connected = 0;
