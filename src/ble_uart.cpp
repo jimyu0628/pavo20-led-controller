@@ -92,10 +92,13 @@ static void adv_start(void) {
     f.name = (uint8_t*)devName;
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
-    ble_gap_adv_set_fields(&f);
+    int rc = ble_gap_adv_set_fields(&f);
+    if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); return; }
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;   // 可连接
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;   // 可发现
-    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
+    if (rc != 0) { printf("[BLE] adv start err %d\n", rc); return; }
+    printf("[BLE] 广播已启动：PavoLED\n");
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg) {
@@ -144,7 +147,6 @@ static void uart_rx_task(void* arg) {
 // ---------------- NimBLE 主机事件 ----------------
 static void on_sync(void) {
     adv_start(); // 公共地址广播（C3 有出厂 MAC），无需地址类型推断
-    printf("[BLE] 广播中：PavoLED（NUS 透传，等待 SpeedyBee App 连接）\n");
 }
 
 static void on_reset(int reason) {
