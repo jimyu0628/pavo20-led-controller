@@ -70,11 +70,12 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
         .uuid = &nus_svc_uuid.u,
         .characteristics = (struct ble_gatt_chr_def[]){
             {.uuid = &nus_rx_uuid.u,
-             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
-             .access_cb = nus_rx_cb},
+             .access_cb = nus_rx_cb,
+             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP},
             {.uuid = &nus_tx_uuid.u,
+             .access_cb = nus_tx_cb,
              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
-             .access_cb = nus_tx_cb, .val_handle = &s_txHandle},
+             .val_handle = &s_txHandle},
             {0}
         }
     },
@@ -147,9 +148,8 @@ static void on_sync(void) {
     printf("[BLE] 广播中：PavoLED（NUS 透传，等待 SpeedyBee App 连接）\n");
 }
 
-static void on_reset(int reason, void* arg) {
-    (void)reason; (void)arg;
-    printf("[BLE] NimBLE reset\n");
+static void on_reset(int reason) {
+    printf("[BLE] NimBLE reset: %d\n", reason);
 }
 
 static void host_task(void* param) {
