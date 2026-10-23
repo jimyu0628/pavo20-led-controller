@@ -1,6 +1,7 @@
 // ============================================================
-// BLE NUS 透传（v32）：NimBLE GATT NUS 服务 + UART0 桥接飞控 MSP
-// 参考 IDF bleprph / NUS 例程；只做 Peripheral，省内存
+// BLE NUS 透传（v32.3）：NimBLE GATT NUS 服务 + UART1 桥接飞控 MSP
+// v32.3 起改用 UART1(GPIO6/7)：GPIO20/21 是 SuperMini 板载 USB 串口引脚，
+// 外接飞控会与 CH340 双驱动互拉（WiFi/BLE 射频被干扰），故换专用串口
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -17,9 +18,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define NUS_UART      UART_NUM_0
-#define NUS_TX_PIN    21   // ESP32 GPIO21 -> 飞控 UART3 RX(B11)
-#define NUS_RX_PIN    20   // 飞控 UART3 TX(B10) -> ESP32 GPIO20
+#define NUS_UART      UART_NUM_1
+#define NUS_TX_PIN    6    // ESP32 GPIO6 -> 飞控 UART1 RX(A10)
+#define NUS_RX_PIN    7    // 飞控 UART1 TX(A09) -> ESP32 GPIO7
 #define NUS_BAUD      115200
 
 static volatile int s_connected = 0;
@@ -168,7 +169,9 @@ static void host_task(void* param) {
 }
 
 void bleUartInit(void) {
-    // UART0：GPIO21 TX -> 飞控 RX，GPIO20 RX <- 飞控 TX，115200
+    // UART1：GPIO6 TX -> 飞控 RX(A10)，GPIO7 RX <- 飞控 TX(A09)，115200
+    // 注意：不能用 GPIO20/21（UART0）——它们与板载 USB 串口(CH340)共用，
+    // 外接飞控会双驱动互拉导致 WiFi/BLE 异常
     uart_config_t u = {
         .baud_rate = NUS_BAUD,
         .data_bits = UART_DATA_8_BITS,
