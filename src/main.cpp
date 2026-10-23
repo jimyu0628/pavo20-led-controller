@@ -93,15 +93,16 @@ static int s_fxPhase = 0;
 static const uint32_t FX_INTERVAL_MS[SPEED_COUNT] = {20, 45, 90};
 // ---------- 持久化 ----------
 static void loadPrefs() {
-    // 开机固定进入本地灯效模式（模式不记忆）：
-    // 无飞控/裸板调试时上电即可直接看灯效、按键可玩；
-    // 颜色/速度/亮度/标定灯数仍断电记忆
-    s_mode       = DEFAULT_MODE;
+    // 开机恢复上次保存的设置（v30 起模式也记忆）：
+    // 颜色/速度/亮度/模式/标定灯数均断电记忆；
+    // 若上次是飞控模式(0)且未接飞控，上电灭灯属正常，单击按键切到本地灯效即可
+    s_mode       = nvsGetU8("mode", DEFAULT_MODE);
     s_colorIdx   = nvsGetU8("color", 0);
     s_speedIdx   = nvsGetU8("speed", 1);
     // 默认亮度 50%（档位 2 = 128/255）；键名 bright1 确保此版首次上电即 50%
     s_brightIdx  = nvsGetU8("bright1", 2);
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
+    if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
     if (s_speedIdx < 0 || s_speedIdx >= SPEED_COUNT) s_speedIdx = 1;
     if (s_brightIdx < 0 || s_brightIdx >= BRIGHT_COUNT) s_brightIdx = 2;
@@ -109,6 +110,7 @@ static void loadPrefs() {
     s_stripLen = (s_calibCount > STRIP_MAX_LEDS) ? STRIP_MAX_LEDS : s_calibCount;
 }
 static void savePrefs() {
+    nvsPutU8("mode", (uint8_t)s_mode);
     nvsPutU8("color", (uint8_t)s_colorIdx);
     nvsPutU8("speed", (uint8_t)s_speedIdx);
     nvsPutU8("bright1", (uint8_t)s_brightIdx);
@@ -181,6 +183,7 @@ static void handleButton(ButtonEvent ev) {
         case BTN_CLICK:
             s_mode = (s_mode + 1) % MODE_COUNT;
             s_fxPhase = 0;
+            savePrefs(); // v30：模式切换也断电记忆
             logMsg("[按键] 模式=%d\n", s_mode);
             break;
         case BTN_DOUBLE:
@@ -215,7 +218,7 @@ int webGetBright() { return s_brightIdx; }
 int webGetCalib()  { return s_calibCount; }
 bool webIsCalibrating() { return s_calibrating; }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
-void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; } }
+void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
 void webSetSpeed(int v)  { if (v >= 0 && v < SPEED_COUNT) { s_speedIdx = v; savePrefs(); } }
 void webSetBright(int v) { if (v >= 0 && v < BRIGHT_COUNT) { s_brightIdx = v; savePrefs(); } }
@@ -260,7 +263,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v29 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v30 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
