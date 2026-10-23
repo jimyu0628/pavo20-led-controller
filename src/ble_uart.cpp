@@ -24,6 +24,10 @@
 //   实测日志完全对上（mtu=247 说明服务发现正常、probe=ok 说明 UART1 正常）。
 //   现按标准改正，并额外给写特征也加上 NOTIFY、按实际订阅的句柄发通知，
 //   兼容把收发放进同一个特征的 App 变体。
+//
+// v32.7：补「先写后订阅」的时序漏洞——App 若在开通知之前就发出 MSP 请求，
+//   飞控的回复会因为当时没有订阅者而丢掉。现在未订阅期间的 UART 回包先入
+//   512 字节暂存区，订阅事件一到立即补发（只补 1s 内的），断开时清空。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -63,6 +67,12 @@ static volatile int s_mtu = 23;        // 当前 MTU（默认 23）
 static volatile int s_sub = 0;         // CCCD 是否已订阅
 static volatile int s_probe = -1;      // MSP 探测：-1 未测 / 0 飞控无回复 / 1 有回复
 
+// 未订阅期间暂存的飞控回包（订阅一开就补发）
+#define PEND_CAP 512
+static uint8_t s_pend[PEND_CAP];
+static volatile int s_pendLen = 0;
+static volatile uint32_t s_pendMs = 0;
+
 uint32_t bleUartTxCount(void) { return s_uartTx; }
 uint32_t bleUartRxCount(void) { return s_uartRx; }
 int bleUartProbe(void) { return s_probe; }
@@ -75,9 +85,9 @@ const char* bleUartDiag(void) {
     static volatile int idx = 0;
     int i = idx;
     idx = 1 - i;
-    snprintf(b[i], sizeof(b[i]), "sub=%d@%u mtu=%d nf=%u/%u e%d probe=%s",
+    snprintf(b[i], sizeof(b[i]), "sub=%d@%u mtu=%d nf=%u/%u e%d p=%d probe=%s",
              s_sub, (unsigned)s_subHandle, s_mtu,
-             (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr,
+             (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr, s_pendLen,
              s_probe < 0 ? "?" : (s_probe ? "ok" : "fail"));
     return b[i];
 }
@@ -128,6 +138,33 @@ static void notifyBytes(const uint8_t* p, int n) {
         }
         s_nfOk += (uint32_t)chunk;
         off += chunk;
+    }
+}
+
+// ---------------- 未订阅时的回包暂存（v32.6） ----------------
+// 部分 App 连上后先写 MSP_API_VERSION、再开通知订阅。若飞控回复先到，
+// 此时没有订阅者，notify 会直接失败，App 依旧白等。这里把这段时间的
+// 回包攒起来，订阅一开立刻补发（只补 1s 内的，太旧的对 MSP 无意义）
+static void pendAppend(const uint8_t* p, int n) {
+    if (n >= PEND_CAP) { p += (n - PEND_CAP); n = PEND_CAP; s_pendLen = 0; }
+    if (s_pendLen + n > PEND_CAP) { // 溢出：丢掉最旧的
+        int keep = PEND_CAP - n;
+        if (keep < 0) keep = 0;
+        if (keep > 0) memmove(s_pend, s_pend + (s_pendLen - keep), keep);
+        s_pendLen = keep;
+    }
+    memcpy(s_pend + s_pendLen, p, n);
+    s_pendLen += n;
+    s_pendMs = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static void pendFlush(void) {
+    int n = s_pendLen;
+    if (n <= 0) return;
+    uint32_t age = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS) - s_pendMs;
+    s_pendLen = 0;
+    if (age < 1000 && s_subHandle) {
+        notifyBytes(s_pend, n);
     }
 }
 
@@ -249,6 +286,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         s_connHandle = 0;
         s_sub = 0;
         s_subHandle = 0;
+        s_pendLen = 0; // 清掉上一轮的残包，避免污染下一次握手
         printf("[BLE] 断开（reason=0x%x），重新广播\n", event->disconnect.reason);
         adv_start();
         // App 走了再探测，避免干扰握手
@@ -277,6 +315,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         printf("[BLE] 订阅事件 h=%u notify=%d  (wr=%u nt=%u) -> sub=%d@%u\n",
                (unsigned)h, on, (unsigned)s_wrHandle, (unsigned)s_ntHandle,
                s_sub, (unsigned)s_subHandle);
+        if (s_sub) pendFlush(); // 订阅前一瞬到达的回包，补发给 App
         break;
     }
     default:
@@ -293,7 +332,8 @@ static void uart_rx_task(void* arg) {
         int n = uart_read_bytes(NUS_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
             s_uartRx += (uint32_t)n; // 无论是否连接都计数：用于判断飞控有没有回
-            notifyBytes(buf, n);
+            if (s_connected && s_subHandle) notifyBytes(buf, n);
+            else pendAppend(buf, n);     // 还没订阅：先攒着，订阅后补发
         }
     }
 }
