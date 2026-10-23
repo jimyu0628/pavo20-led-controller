@@ -28,6 +28,20 @@
 // v32.7：补「先写后订阅」的时序漏洞——App 若在开通知之前就发出 MSP 请求，
 //   飞控的回复会因为当时没有订阅者而丢掉。现在未订阅期间的 UART 回包先入
 //   512 字节暂存区，订阅事件一到立即补发（只补 1s 内的），断开时清空。
+//
+// v32.8：SpeedyBee App 根本不用 NUS。
+//   实测 v32.7：App 连上后只做 MTU 协商（247），sub=0、tx=0，一个 ATT 写都没发，
+//   2.6s 后 reason=0x213 主动断开并报「设备初始化失败」；扫描列表里也只显示
+//   「未知设备」。说明服务发现后没找到它认的服务。
+//   SpeedyBee 官方说明「任何兼容的蓝牙模块都可使用」，它兼容的第三方模块是
+//   HM-10/AT-09 系列（服务 FFE0 / 特征 FFE1）。因此现在同时挂三套服务：
+//     NUS(6E400001)  —— Betaflight Configurator / Web Bluetooth
+//     FFE0/FFE1      —— HM-10、SpeedyBee App
+//     FFF0/FFF1/FFF2 —— 部分国产透传模块
+//   三套共用同一个 UART 桥，App 认哪套用哪套；FFE0/FFF0 放进扫描响应
+//   （主广播包已被 NUS 128-bit UUID + 名字占满 30/31 字节）。
+//   另外每条特征访问都会打印 h=句柄 与首字节，下次认不出设备时能直接看
+//   App 到底碰了哪个句柄。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -55,6 +69,9 @@ static volatile int s_connected = 0;
 static uint16_t s_connHandle = 0;   // 当前连接句柄（通知用）
 static uint16_t s_wrHandle = 0;     // 写特征句柄（NUS RX，手机->飞控）
 static uint16_t s_ntHandle = 0;     // 通知特征句柄（NUS TX，飞控->手机）
+static uint16_t s_ffHandle = 0;     // HM-10 FFE1（读写+通知，二合一）
+static uint16_t s_f0NtHandle = 0;   // FFF1 通知
+static uint16_t s_f0WrHandle = 0;   // FFF2 写
 static volatile uint16_t s_subHandle = 0; // 实际被订阅通知的句柄（0=未订阅）
 static volatile int s_initErr = 0;   // BLE 初始化失败标记
 static volatile int s_advOk = 0;     // 广播是否成功发出
@@ -107,6 +124,17 @@ static const ble_uuid128_t nus_nt_uuid =
     BLE_UUID128_INIT(0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0,
                      0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x03, 0x40, 0x6E); // TX 通知（飞控->手机）
 
+// v32.8：SpeedyBee App 认不出 NUS，改用 HM-10/AT-09 那一套（FFE0/FFE1）。
+// 官方说明「任何兼容的蓝牙模块都可使用」，它兼容的第三方模块就是 HM-10 系列；
+// 我们只挂 NUS 时，App 服务发现后找不到目标服务 → 直接报「初始化失败」并断开
+// （实测：连上后只做 MTU 协商，sub=0、tx=0，一个 ATT 写都没发）。
+// 现在三套服务同时挂上、共用同一个 UART 桥，App 认哪套就用哪套。
+static const ble_uuid16_t ff_svc_uuid = BLE_UUID16_INIT(0xFFE0); // HM-10 服务
+static const ble_uuid16_t ff_chr_uuid = BLE_UUID16_INIT(0xFFE1); // HM-10 收发特征
+static const ble_uuid16_t f0_svc_uuid = BLE_UUID16_INIT(0xFFF0); // 部分国产模块
+static const ble_uuid16_t f0_nt_uuid  = BLE_UUID16_INIT(0xFFF1); // FFF1 通知
+static const ble_uuid16_t f0_wr_uuid  = BLE_UUID16_INIT(0xFFF2); // FFF2 写
+
 const char* bleUartState(void) {
     if (s_initErr) return "ble err";
     if (!s_advOk) return "ble adv fail";
@@ -135,8 +163,7 @@ static void notifyBytes(const uint8_t* p, int n) {
             s_nfErr++;
             s_nfLastErr = rc;
             return;
-        }
-        s_nfOk += (uint32_t)chunk;
+        }        s_nfOk += (uint32_t)chunk;
         off += chunk;
     }
 }
@@ -169,29 +196,58 @@ static void pendFlush(void) {
 }
 
 // ---------------- GATT 特征回调 ----------------
-static int nus_wr_cb(uint16_t conn_handle, uint16_t attr_handle,
+// v32.8：所有写特征共用一个回调；顺手把「App 到底碰了哪个句柄」打到串口，
+// 下次 App 认不出设备时，一眼就能看出它有没有读写我们的特征
+static volatile int s_dbgLeft = 0; // 每次连接后前 N 条访问打印，防刷屏
+
+static void dbgAccess(const char* tag, uint16_t h, int n, const uint8_t* p) {
+    if (s_dbgLeft <= 0) return;
+    s_dbgLeft--;
+    if (n > 0 && p) {
+        printf("[BLE] %s h=%u len=%d [%02X %02X %02X %02X %02X %02X]\n", tag,
+               (unsigned)h, n, p[0], n > 1 ? p[1] : 0, n > 2 ? p[2] : 0,
+               n > 3 ? p[3] : 0, n > 4 ? p[4] : 0, n > 5 ? p[5] : 0);
+    } else {
+        printf("[BLE] %s h=%u len=%d\n", tag, (unsigned)h, n);
+    }
+}
+
+static int chr_wr_cb(uint16_t conn_handle, uint16_t attr_handle,
                      struct ble_gatt_access_ctxt* ctxt, void* arg) {
-    (void)conn_handle; (void)attr_handle; (void)arg;
+    (void)conn_handle; (void)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         int n = os_mbuf_len(ctxt->om);
         if (n > 0) {
             uint8_t tmp[256];
             if (n > (int)sizeof(tmp)) n = (int)sizeof(tmp);
             os_mbuf_copydata(ctxt->om, 0, n, tmp);
+            dbgAccess("WR", attr_handle, n, tmp);
+            // HM-10 的 AT 探测：这类模块会对 "AT" 回 "OK"。不能转给飞控
+            // （会污染 MSP 流），这里自己回一句，让 App 认为接的是透传模块。
+            // MSP 帧一定以 '$'(0x24) 开头，不可能误判。
+            if (n >= 2 && tmp[0] == 'A' && tmp[1] == 'T') {
+                static const char ok[] = "OK\r\n";
+                notifyBytes((const uint8_t*)ok, 4);
+                return 0;
+            }
             uart_write_bytes(NUS_UART, tmp, n); // -> 飞控
             s_uartTx += (uint32_t)n;
         }
+    } else if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        dbgAccess("RD", attr_handle, 0, NULL);
     }
     return 0;
 }
 
-static int nus_nt_cb(uint16_t conn_handle, uint16_t attr_handle,
+static int chr_nt_cb(uint16_t conn_handle, uint16_t attr_handle,
                      struct ble_gatt_access_ctxt* ctxt, void* arg) {
-    (void)conn_handle; (void)attr_handle; (void)ctxt; (void)arg;
+    (void)conn_handle; (void)arg;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) dbgAccess("RD", attr_handle, 0, NULL);
     return 0; // 只用于通知，读不返回数据
 }
 
 static const struct ble_gatt_svc_def gatt_svcs[] = {
+    // ① Nordic UART（Betaflight Configurator / Web Bluetooth 用这套）
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &nus_svc_uuid.u,
@@ -199,15 +255,44 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
             // NUS RX（...02）：手机写 -> 飞控。同时也开 NOTIFY，
             // 兼容把收发放进同一个特征的 App 变体
             {.uuid = &nus_wr_uuid.u,
-             .access_cb = nus_wr_cb,
+             .access_cb = chr_wr_cb,
              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
                       BLE_GATT_CHR_F_NOTIFY,
              .val_handle = &s_wrHandle},
             // NUS TX（...03）：飞控 -> 手机通知
             {.uuid = &nus_nt_uuid.u,
-             .access_cb = nus_nt_cb,
+             .access_cb = chr_nt_cb,
              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
              .val_handle = &s_ntHandle},
+            {0}
+        }
+    },
+    // ② HM-10 / AT-09 兼容（SpeedyBee App 认这套：服务 FFE0，特征 FFE1 读写通知三合一）
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &ff_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {.uuid = &ff_chr_uuid.u,
+             .access_cb = chr_wr_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+                      BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_ffHandle},
+            {0}
+        }
+    },
+    // ③ FFF0（部分国产透传模块：FFF1 通知 / FFF2 写）
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &f0_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {.uuid = &f0_nt_uuid.u,
+             .access_cb = chr_nt_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_f0NtHandle},
+            {.uuid = &f0_wr_uuid.u,
+             .access_cb = chr_wr_cb,
+             .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+             .val_handle = &s_f0WrHandle},
             {0}
         }
     },
@@ -241,20 +326,34 @@ static void adv_start(void) {
     struct ble_hs_adv_fields f = {0};
     const char* devName = "PavoLED";
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
-    f.uuids128 = &nus_svc_uuid;          // 广播带 NUS 服务 UUID（SpeedyBee 等按服务识别）
+    f.uuids128 = &nus_svc_uuid;          // 广播带 NUS 服务 UUID（Betaflight Configurator 用）
     f.num_uuids128 = 1;
     f.uuids128_is_complete = 1;
     f.name = (uint8_t*)devName;
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
-    int rc = ble_gap_adv_set_fields(&f);
+    int rc = ble_gap_adv_set_fields(&f);   // 3 + 18 + 9 = 30 字节，刚好放得下
     if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); s_advOk = 0; return; }
+
+    // v32.8：主广播包 31 字节已被 NUS+名字占满，FFE0/FFF0 放扫描响应里。
+    // Android 会把 adv + scan response 合并成一条 scanRecord，按服务 UUID
+    // 过滤的 App（SpeedyBee 就属于这种）照样能扫到。
+    static const ble_uuid16_t rsp_uuids[] = { BLE_UUID16_INIT(0xFFE0),
+                                             BLE_UUID16_INIT(0xFFF0) };
+    struct ble_hs_adv_fields rsp = {0};
+    rsp.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    rsp.uuids16 = rsp_uuids;
+    rsp.num_uuids16 = 2;
+    rsp.uuids16_is_complete = 1;
+    int rc2 = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc2 != 0) printf("[BLE] adv rsp err %d（不影响连接）\n", rc2);
+
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;   // 可连接
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;   // 可发现
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
     if (rc != 0) { printf("[BLE] adv start err %d\n", rc); s_advOk = 0; return; }
     s_advOk = 1;
-    printf("[BLE] 广播已启动：PavoLED\n");
+    printf("[BLE] 广播已启动：PavoLED（NUS + FFE0 + FFF0）\n");
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg) {
@@ -266,8 +365,10 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             s_connHandle = event->connect.conn_handle;
             s_sub = 0;
             s_subHandle = 0;
-            printf("[BLE] 已连接（wr=%u nt=%u）\n",
-                   (unsigned)s_wrHandle, (unsigned)s_ntHandle);
+            s_dbgLeft = 40; // 每次连接打印前 40 条特征访问，便于看 App 碰了谁
+            printf("[BLE] 已连接（NUS wr=%u nt=%u | FFE1=%u | FFF1=%u FFF2=%u）\n",
+                   (unsigned)s_wrHandle, (unsigned)s_ntHandle, (unsigned)s_ffHandle,
+                   (unsigned)s_f0NtHandle, (unsigned)s_f0WrHandle);
             // 请求更快的连接参数：WiFi AP 同时在跑（单射频分时），
             // 连接间隔太大会让 MSP 回复迟到甚至被 supervision 超时踢掉
             struct ble_gap_upd_params up = {0};
@@ -302,19 +403,17 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_SUBSCRIBE: {
         uint16_t h = event->subscribe.attr_handle;
         int on = event->subscribe.cur_notify ? 1 : 0;
-        // 哪个句柄被订阅就发到哪个：优先标准 TX(...03)，其次 RX(...02)
+        // v32.8：不再限定某个服务——App 订阅哪个句柄就往哪个发，
+        // 这样 NUS / FFE1 / FFF1 三套都能工作
         if (on) {
-            if (h == s_ntHandle || s_subHandle == 0) {
-                s_subHandle = h;
-                s_sub = 1;
-            }
+            s_subHandle = h;
+            s_sub = 1;
         } else if (h == s_subHandle) {
             s_subHandle = 0;
             s_sub = 0;
         }
-        printf("[BLE] 订阅事件 h=%u notify=%d  (wr=%u nt=%u) -> sub=%d@%u\n",
-               (unsigned)h, on, (unsigned)s_wrHandle, (unsigned)s_ntHandle,
-               s_sub, (unsigned)s_subHandle);
+        printf("[BLE] 订阅事件 h=%u notify=%d -> sub=%d@%u\n",
+               (unsigned)h, on, s_sub, (unsigned)s_subHandle);
         if (s_sub) pendFlush(); // 订阅前一瞬到达的回包，补发给 App
         break;
     }
