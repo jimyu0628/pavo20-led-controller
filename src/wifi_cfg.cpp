@@ -78,6 +78,8 @@ static esp_err_t handler_set(httpd_req_t* req) {
             webSetSpeed(atoi(v));
         if (httpd_query_key_value(q, "bright", v, sizeof(v)) == ESP_OK)
             webSetBright(atoi(v));
+        if (httpd_query_key_value(q, "count", v, sizeof(v)) == ESP_OK)
+            webSetCount(atoi(v));
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req);
@@ -132,6 +134,21 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 <div class="card"><h3>速度</h3><div class="btns" id="speeds"></div></div>
 <div class="card"><h3>亮度</h3><div class="btns" id="brights"></div></div>
 
+<div class="card"><h3>LED 数量</h3>
+ <div style="display:flex;gap:8px;align-items:center">
+  <input id="cnt" type="number" min="1" max="128" value="55"
+         style="flex:1;min-height:44px;background:#222;border:1px solid #333;color:#eee;border-radius:8px;font-size:16px;padding:0 10px">
+  <button style="flex:0 0 auto" onclick="setCount()">应用</button>
+ </div>
+ <div class="btns" style="margin-top:8px">
+  <button onclick="setCountV(32)">32</button>
+  <button onclick="setCountV(55)">55</button>
+  <button onclick="setCountV(60)">60</button>
+  <button onclick="setCountV(78)">78</button>
+ </div>
+ <div style="color:#888;font-size:12px;margin-top:6px">即时生效并断电记忆；与按键标定（长按 3 秒）等效</div>
+</div>
+
 <div class="card">
  <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi（需重启才能重新开启）</button>
 </div>
@@ -149,6 +166,7 @@ function render(){
  document.getElementById("st").textContent =
   "模式："+M[st.mode]+" · 颜色："+C[st.color]+" · 速度："+S[st.speed]+
   " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"");
+ var c=document.getElementById("cnt"); if(c)c.value=st.calib;
  var mm=document.getElementById("modes"); mm.innerHTML="";
  for(var i=0;i<10;i++){var b=document.createElement("button");b.textContent=i+" "+M[i];
   if(i==st.mode)b.className="on";b.onclick=(function(n){return function(){set("mode",n);};})(i);mm.appendChild(b);}
@@ -164,6 +182,9 @@ function render(){
   if(i==st.bright)b.className="on";b.onclick=(function(n){return function(){set("bright",n);};})(i);bb.appendChild(b);}
 }
 function set(k,n){fetch("/api/set?"+k+"="+n).then(function(r){return r.json();}).then(function(j){st=j;render();});}
+function setCount(){var n=parseInt(document.getElementById("cnt").value,10);
+ if(!n||n<1||n>128){toast("请输入 1-128");return;}set("count",n);}
+function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
 function offWifi(){if(confirm("确定关闭 WiFi？关闭后需重启设备才能重新开启。")){
  fetch("/api/wifi/off").then(function(){toast("WiFi 已关闭");setTimeout(function(){document.getElementById("btnOff").disabled=true;},300);});}}
 function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}

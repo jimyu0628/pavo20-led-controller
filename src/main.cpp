@@ -219,6 +219,17 @@ void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhas
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
 void webSetSpeed(int v)  { if (v >= 0 && v < SPEED_COUNT) { s_speedIdx = v; savePrefs(); } }
 void webSetBright(int v) { if (v >= 0 && v < BRIGHT_COUNT) { s_brightIdx = v; savePrefs(); } }
+
+// 网页设置 LED 数量（等价于按键标定：只记总数，红蓝按比例自动分配）
+void webSetCount(int v) {
+    if (s_calibrating) return; // 标定中不干预
+    if (v < 1) v = 1;
+    if (v > CALIB_MAX) v = CALIB_MAX;
+    if (v == s_calibCount) return;
+    s_calibCount = v;
+    s_stripLen = (v > STRIP_MAX_LEDS) ? STRIP_MAX_LEDS : v;
+    savePrefs();
+}
 // 立即按当前设置刷新灯带（模式切换即时生效；标定中不干预）
 void webApplyNow() {
     if (s_calibrating) return;
@@ -249,7 +260,7 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 v28 | 灯数=%d 比例=1:%d 模式=%d ===\n",
+    logMsg("=== 幻彩灯带控制板 v29 | 灯数=%d 比例=1:%d 模式=%d ===\n",
            s_calibCount, currentRatio(), s_mode);
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
