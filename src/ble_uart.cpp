@@ -1,12 +1,23 @@
 // ============================================================
-// BLE NUS 透传（v32.3）：NimBLE GATT NUS 服务 + UART1 桥接飞控 MSP
+// BLE NUS 透传（v32.5）：NimBLE GATT NUS 服务 + UART1 桥接飞控 MSP
 // v32.3 起改用 UART1(GPIO6/7)：GPIO20/21 是 SuperMini 板载 USB 串口引脚，
 // 外接飞控会与 CH340 双驱动互拉（WiFi/BLE 射频被干扰），故换专用串口
+//
+// v32.5 针对「SpeedyBee 连接 2 秒后断开（MSP 握手无回复）」的加固：
+//   1) notify 按 (MTU-3) 分片——原来一次塞 256 字节，超过 MTU 会返回
+//      BLE_HS_EMSGSIZE 且整包丢弃，App 永远等不到回复（最可能的真凶）
+//   2) 跟踪 CCCD 订阅状态（BLE_GAP_EVENT_SUBSCRIBE），未订阅不发 notify
+//   3) notify 成功/失败分别计数并记录最后一次错误码，心跳直接看得到
+//   4) 主动协商 MTU（247），并记录协商结果
+//   5) 连接后请求更快的连接参数，WiFi/BLE 共存时不易被 supervision 超时踢掉
+//   6) 开机 5s + 每次断开后自动「MSP 探测」：固件自己发一帧 MSP_API_VERSION，
+//      看飞控到底回不回，一条心跳就能分清是飞控侧还是固件侧的问题
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
 #include "esp_bt.h"
 #include "host/ble_hs.h"
+#include "host/ble_att.h"
 #include "host/util/util.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -22,17 +33,34 @@
 #define NUS_TX_PIN    6    // ESP32 GPIO6 -> 飞控 UART1 RX(A10)
 #define NUS_RX_PIN    7    // 飞控 UART1 TX(A09) -> ESP32 GPIO7
 #define NUS_BAUD      115200
+#define NUS_MTU_WANT  247  // 期望 MTU（247 -> notify 载荷 244）
 
 static volatile int s_connected = 0;
 static uint16_t s_connHandle = 0; // 当前连接句柄（通知用）
 static uint16_t s_txHandle = 0;
-static volatile int s_initErr = 0; // BLE 初始化失败标记
-static volatile int s_advOk = 0;   // 广播是否成功发出
+static volatile int s_initErr = 0;   // BLE 初始化失败标记
+static volatile int s_advOk = 0;     // 广播是否成功发出
 static volatile uint32_t s_uartTx = 0; // 透传：手机->飞控 累计字节
-static volatile uint32_t s_uartRx = 0; // 透传：飞控->手机 累计字节
+static volatile uint32_t s_uartRx = 0; // 透传：飞控->手机 累计字节（UART 实际收到）
+static volatile uint32_t s_nfOk = 0;   // notify 成功送达字节
+static volatile uint32_t s_nfErr = 0;  // notify 失败次数
+static volatile int s_nfLastErr = 0;   // 最后一次 notify 错误码
+static volatile int s_mtu = 23;        // 当前 MTU（默认 23）
+static volatile int s_sub = 0;         // CCCD 是否已订阅
+static volatile int s_probe = -1;      // MSP 探测：-1 未测 / 0 飞控无回复 / 1 有回复
 
 uint32_t bleUartTxCount(void) { return s_uartTx; }
 uint32_t bleUartRxCount(void) { return s_uartRx; }
+int bleUartProbe(void) { return s_probe; }
+
+// 心跳/网页用的一行诊断串
+const char* bleUartDiag(void) {
+    static char b[96];
+    snprintf(b, sizeof(b), "sub=%d mtu=%d nf=%u/%u e%d probe=%s",
+             s_sub, s_mtu, (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr,
+             s_probe < 0 ? "?" : (s_probe ? "ok" : "fail"));
+    return b;
+}
 
 // NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
 static const ble_uuid128_t nus_svc_uuid =
@@ -49,7 +77,30 @@ const char* bleUartState(void) {
     if (s_initErr) return "ble err";
     if (!s_advOk) return "ble adv fail";
     if (!s_connected) return "ble adv";
-    return "ble conn";
+    return s_sub ? "ble conn" : "ble conn(no sub)";
+}
+
+// ---------------- 分片通知（修复 MTU 超限整包丢弃） ----------------
+static void notifyBytes(const uint8_t* p, int n) {
+    if (!s_connected || s_connHandle == 0 || s_txHandle == 0) return;
+    int maxPayload = s_mtu - 3;
+    if (maxPayload < 20) maxPayload = 20; // ATT 默认最小值兜底
+    int off = 0;
+    while (off < n) {
+        int chunk = n - off;
+        if (chunk > maxPayload) chunk = maxPayload;
+        struct os_mbuf* om = ble_hs_mbuf_from_flat(p + off, chunk);
+        if (!om) { s_nfErr++; s_nfLastErr = -1; return; }
+        int rc = ble_gatts_notify_custom(s_connHandle, s_txHandle, om);
+        if (rc != 0) {
+            // 未订阅(EDONE)/缓冲区满(ENOMEM)/超长(EMSGSIZE) 都记下来
+            s_nfErr++;
+            s_nfLastErr = rc;
+            return;
+        }
+        s_nfOk += (uint32_t)chunk;
+        off += chunk;
+    }
 }
 
 // ---------------- GATT 特征回调 ----------------
@@ -63,7 +114,7 @@ static int nus_rx_cb(uint16_t conn_handle, uint16_t attr_handle,
             if (n > (int)sizeof(tmp)) n = (int)sizeof(tmp);
             os_mbuf_copydata(ctxt->om, 0, n, tmp);
             uart_write_bytes(NUS_UART, tmp, n); // -> 飞控
-            s_uartTx += n;
+            s_uartTx += (uint32_t)n;
         }
     }
     return 0;
@@ -92,6 +143,25 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
     },
     {0}
 };
+
+// ---------------- MSP 探测：固件自己问一句飞控 ----------------
+// 发 $M< 0x00 0x01 0x01（MSP_API_VERSION 请求，size=0 cmd=1 crc=1），
+// 300ms 内 UART1 收到任何字节 → 判飞控有回复。App 未连接时才执行，不干扰握手。
+static void probeTask(void* arg) {
+    (void)arg;
+    static const uint8_t req[] = {0x24, 0x4D, 0x3C, 0x00, 0x01, 0x01};
+    uint32_t before = s_uartRx;
+    uart_write_bytes(NUS_UART, req, sizeof(req));
+    uart_wait_tx_done(NUS_UART, pdMS_TO_TICKS(100));
+    for (int i = 0; i < 8; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (s_uartRx != before) break;
+    }
+    s_probe = (s_uartRx != before) ? 1 : 0;
+    printf("[MSP] 探测：%s\n", s_probe ? "飞控有回复（UART1 通）"
+                                      : "飞控无回复（查线序/飞控 serial 0 64/波特率）");
+    vTaskDelete(NULL);
+}
 
 // ---------------- 广播 ----------------
 static int gap_event(struct ble_gap_event* event, void* arg); // 前向声明
@@ -124,7 +194,16 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         if (event->connect.status == 0) {
             s_connected = 1;
             s_connHandle = event->connect.conn_handle;
+            s_sub = 0;
             printf("[BLE] 已连接\n");
+            // 请求更快的连接参数：WiFi AP 同时在跑（单射频分时），
+            // 连接间隔太大会让 MSP 回复迟到甚至被 supervision 超时踢掉
+            struct ble_gap_upd_params up = {0};
+            up.itvl_min = 12;   // 15ms
+            up.itvl_max = 24;   // 30ms
+            up.latency = 0;
+            up.timeout = 400;   // 4s 监督超时
+            ble_gap_update_params(event->connect.conn_handle, &up);
         } else {
             s_connected = 0;
             adv_start(); // 连接失败继续广播
@@ -133,11 +212,24 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_DISCONNECT:
         s_connected = 0;
         s_connHandle = 0;
-        printf("[BLE] 断开，重新广播\n");
+        s_sub = 0;
+        printf("[BLE] 断开（reason=0x%x），重新广播\n", event->disconnect.reason);
         adv_start();
+        // App 走了再探测，避免干扰握手
+        xTaskCreate(probeTask, "mspProbe", 2560, NULL, 4, NULL);
         break;
     case BLE_GAP_EVENT_ADV_COMPLETE:
         adv_start(); // 广播结束（超时）重新广播
+        break;
+    case BLE_GAP_EVENT_MTU:
+        s_mtu = event->mtu.value;
+        printf("[BLE] MTU=%d（notify 载荷 %d）\n", s_mtu, s_mtu - 3);
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if (event->subscribe.attr_handle == s_txHandle) {
+            s_sub = event->subscribe.cur_notify ? 1 : 0;
+            printf("[BLE] 通知订阅=%d\n", s_sub);
+        }
         break;
     default:
         break;
@@ -150,13 +242,10 @@ static void uart_rx_task(void* arg) {
     (void)arg;
     uint8_t buf[256];
     while (1) {
-        int n = uart_read_bytes(NUS_UART, buf, sizeof(buf), pdMS_TO_TICKS(50));
-        if (n > 0 && s_connected) {
-            s_uartRx += n; // 飞控->手机 字节（无论通知成败都计数）
-            struct os_mbuf* om = ble_hs_mbuf_from_flat(buf, n);
-            if (om) {
-                ble_gatts_notify_custom(s_connHandle, s_txHandle, om);
-            }
+        int n = uart_read_bytes(NUS_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
+        if (n > 0) {
+            s_uartRx += (uint32_t)n; // 无论是否连接都计数：用于判断飞控有没有回
+            notifyBytes(buf, n);
         }
     }
 }
@@ -200,6 +289,7 @@ void bleUartInit(void) {
         printf("[BLE] nimble_port_init FAIL %d\n", (int)ret);
         return;
     }
+    ble_att_set_preferred_mtu(NUS_MTU_WANT); // 主动要 247，避免默认 23 把 MSP 帧切碎
     ble_svc_gap_device_name_set("PavoLED");
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -207,5 +297,10 @@ void bleUartInit(void) {
     ble_gatts_add_svcs(gatt_svcs);
     nimble_port_freertos_init(host_task);
 
-    xTaskCreate(uart_rx_task, "bleuart", 2048, NULL, 5, NULL);
+    xTaskCreate(uart_rx_task, "bleuart", 3072, NULL, 5, NULL);
+    // 开机 5s 自动探测一次飞控（此时飞控已启动完），结果进心跳/网页调试区
+    xTaskCreate([](void*) {
+        vTaskDelay(pdMS_TO_TICKS(5000));
+        probeTask(NULL);
+    }, "mspProbe0", 2560, NULL, 4, NULL);
 }

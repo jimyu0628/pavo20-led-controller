@@ -43,7 +43,9 @@ static void delayMs(uint32_t ms) {
 //  - 只用于启动/按键/标定等低频消息；经实测 printf 不会阻塞主任务
 //    （此前任务看门狗超时真凶是 GPIO4 悬空导致的 RMT RX 中断风暴，已修复）
 static void logMsg(const char* fmt, ...) {
-    char buf[160];
+    // v32.5：160 字节太小——心跳整行 180+ 字符会被 vsnprintf 截断，
+    // 导致 [MSP]/[RX] 后半段永远打不出来（排查时看不到关键字段）
+    char buf[320];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -304,10 +306,10 @@ extern "C" void app_main(void) {
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u tx=%u | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), bleUartState(), otaVersion(),
-                   urx - lastUrx, utx - lastUtx,
+                   urx - lastUrx, utx - lastUtx, bleUartDiag(),
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
                    (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,

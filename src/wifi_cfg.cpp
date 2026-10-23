@@ -60,11 +60,13 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
 static void touchHttp() { s_lastHttpUs = esp_timer_get_time(); }
 
 static void sendState(httpd_req_t* req) {
-    char buf[640];
+    // v32.5：boot 最多 512 字节，原 640 缓冲放全套字段会截断 JSON（网页白屏），放宽到 1024
+    char buf[1024];
     snprintf(buf, sizeof(buf),
-             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\",\"dns\":%d,\"boot\":\"%s\"}",
+             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\",\"bdiag\":\"%s\",\"dns\":%d,\"boot\":\"%s\"}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
-             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(), bleUartState(),
+             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(),
+             bleUartState(), bleUartDiag(),
              wifiCfgDnsOk(), wifiCfgBootInfo());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_sendstr(req, buf);
@@ -174,7 +176,7 @@ var C=["白","红","黄","蓝","绿","青","品红","关"];
 var CS=["#fff","#f33","#ff3","#36f","#3f3","#0ff","#f3f","#000"];
 var S=["快","中","慢"];
 var B=["100%","75%","50%","25%"];
-var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:"",dns:0,boot:""};
+var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:"",bdiag:"",dns:0,boot:""};
 
 function render(){
  var ve=document.getElementById("ver"); if(ve)ve.textContent=st.v;
@@ -212,6 +214,7 @@ function dbgRefresh(){var d=document.getElementById("dbg");
   "\nWiFi 状态 : "+(st.ws||"n/a")+
   "\nDNS 劫持 : "+(st.dns?"ok":"fail/未启动")+
   "\nBLE 状态 : "+(st.ble||"n/a")+
+  "\nBLE 透传 : "+(st.bdiag||"n/a")+"   （sub=已订阅 mtu=协商值 nf=通知成功/失败 probe=飞控探测）"+
   "\n开机信息 : "+(st.boot||"n/a")+
   "\n模式/颜色/速度/亮度 : "+st.mode+"/"+st.color+"/"+st.speed+"/"+st.bright+
   "\nLED 数量 : "+st.calib+" 颗"+(st.cal?"（标定中）":"")+
