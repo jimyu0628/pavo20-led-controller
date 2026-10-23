@@ -94,6 +94,9 @@ static void adv_start(void) {
     struct ble_hs_adv_fields f = {0};
     const char* devName = "PavoLED";
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
+    f.uuids128 = &nus_svc_uuid;          // 广播带 NUS 服务 UUID（SpeedyBee 等按服务识别）
+    f.num_uuids128 = 1;
+    f.uuids128_is_complete = 1;
     f.name = (uint8_t*)devName;
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
