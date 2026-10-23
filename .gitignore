@@ -1,0 +1,12 @@
+# PlatformIO 构建产物
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# 固件构件
+*.bin
+*.elf
+*.map
+
+# WorkBuddy 会话/记忆目录（本地数据，不入库）
+.workbuddy/
