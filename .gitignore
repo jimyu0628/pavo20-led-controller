@@ -8,5 +8,8 @@
 *.elf
 *.map
 
+# 本地调试工具（nRF Connect APK 等，10MB 级二进制不入库）
+tools/
+
 # WorkBuddy 会话/记忆目录（本地数据，不入库）
 .workbuddy/
