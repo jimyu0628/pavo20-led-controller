@@ -32,5 +32,6 @@ void webSetMode(int v);
 void webSetColor(int v);
 void webSetSpeed(int v);
 void webSetBright(int v);
+void webSetCount(int v); // 设置 LED 数量（1~128，断电记忆，等价按键标定）
 // 立即按当前设置刷新灯带（模式切换即时生效）
 void webApplyNow();
