@@ -24,6 +24,7 @@
 #include "button.h"
 #include "wifi_cfg.h"
 #include "ble_uart.h"
+#include "ota.h"
 #include "esp_ota_ops.h"
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -293,9 +294,9 @@ extern "C" void app_main(void) {
             wifiCfgPoll(now); // 每秒：判定关闭 WiFi（30s 无连接 / 60s 无访问 / 网页请求）
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | v%s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
-                   wst, wifiCfgStr(), bleUartState(),
+                   wst, wifiCfgStr(), bleUartState(), otaVersion(),
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
                    (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,
