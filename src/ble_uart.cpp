@@ -54,12 +54,17 @@ uint32_t bleUartRxCount(void) { return s_uartRx; }
 int bleUartProbe(void) { return s_probe; }
 
 // 心跳/网页用的一行诊断串
+// 用双缓冲交替：心跳（主任务）和 /api/state（httpd 任务）会并发调用，
+// 共用一个 static buffer 可能互相覆盖，导致调试区里数字串行
 const char* bleUartDiag(void) {
-    static char b[96];
-    snprintf(b, sizeof(b), "sub=%d mtu=%d nf=%u/%u e%d probe=%s",
+    static char b[2][96];
+    static volatile int idx = 0;
+    int i = idx;
+    idx = 1 - i;
+    snprintf(b[i], sizeof(b[i]), "sub=%d mtu=%d nf=%u/%u e%d probe=%s",
              s_sub, s_mtu, (unsigned)s_nfOk, (unsigned)s_nfErr, s_nfLastErr,
              s_probe < 0 ? "?" : (s_probe ? "ok" : "fail"));
-    return b;
+    return b[i];
 }
 
 // NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
