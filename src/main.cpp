@@ -293,6 +293,7 @@ extern "C" void app_main(void) {
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
     uint32_t lastTxTotal = 0;
+    uint32_t lastUrx = 0, lastUtx = 0; // MSP 透传字节（每秒差值）
     FcFrame frame;
     while (1) {
         uint32_t now = nowMs();
@@ -302,14 +303,17 @@ extern "C" void app_main(void) {
             wifiCfgPoll(now); // 每秒：判定关闭 WiFi（30s 无连接 / 60s 无访问 / 网页请求）
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u tx=%u | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), bleUartState(), otaVersion(),
+                   urx - lastUrx, utx - lastUtx,
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
                    (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,
                    (uint32_t)g_rxFrames, (uint32_t)g_rxLastLeds);
             lastTxTotal = cur;
+            lastUrx = urx; lastUtx = utx;
         }
         // 1) 按键（每 5ms）
         if (now - lastBtnPoll >= 5) {

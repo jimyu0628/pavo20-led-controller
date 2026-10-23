@@ -28,6 +28,11 @@ static uint16_t s_connHandle = 0; // 当前连接句柄（通知用）
 static uint16_t s_txHandle = 0;
 static volatile int s_initErr = 0; // BLE 初始化失败标记
 static volatile int s_advOk = 0;   // 广播是否成功发出
+static volatile uint32_t s_uartTx = 0; // 透传：手机->飞控 累计字节
+static volatile uint32_t s_uartRx = 0; // 透传：飞控->手机 累计字节
+
+uint32_t bleUartTxCount(void) { return s_uartTx; }
+uint32_t bleUartRxCount(void) { return s_uartRx; }
 
 // NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
 static const ble_uuid128_t nus_svc_uuid =
@@ -58,6 +63,7 @@ static int nus_rx_cb(uint16_t conn_handle, uint16_t attr_handle,
             if (n > (int)sizeof(tmp)) n = (int)sizeof(tmp);
             os_mbuf_copydata(ctxt->om, 0, n, tmp);
             uart_write_bytes(NUS_UART, tmp, n); // -> 飞控
+            s_uartTx += n;
         }
     }
     return 0;
@@ -146,6 +152,7 @@ static void uart_rx_task(void* arg) {
     while (1) {
         int n = uart_read_bytes(NUS_UART, buf, sizeof(buf), pdMS_TO_TICKS(50));
         if (n > 0 && s_connected) {
+            s_uartRx += n; // 飞控->手机 字节（无论通知成败都计数）
             struct os_mbuf* om = ble_hs_mbuf_from_flat(buf, n);
             if (om) {
                 ble_gatts_notify_custom(s_connHandle, s_txHandle, om);
