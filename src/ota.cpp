@@ -73,8 +73,10 @@ static esp_err_t sendJsonErr(httpd_req_t* req, const char* msg) {
 }
 
 static esp_err_t handler_ota_post(httpd_req_t* req) {
-    const char* ct = httpd_req_get_hdr_value_str(req, "Content-Type");
-    if (!ct) return sendJsonErr(req, "no content-type");
+    char ctBuf[192];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", ctBuf, sizeof(ctBuf)) != ESP_OK)
+        return sendJsonErr(req, "no content-type");
+    const char* ct = ctBuf;
     const char* bd = strstr(ct, "boundary=");
     if (!bd) return sendJsonErr(req, "no boundary");
     bd += 9;
