@@ -26,6 +26,7 @@ static volatile int s_connected = 0;
 static uint16_t s_connHandle = 0; // 当前连接句柄（通知用）
 static uint16_t s_txHandle = 0;
 static volatile int s_initErr = 0; // BLE 初始化失败标记
+static volatile int s_advOk = 0;   // 广播是否成功发出
 
 // NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
 static const ble_uuid128_t nus_svc_uuid =
@@ -40,6 +41,7 @@ static const ble_uuid128_t nus_tx_uuid =
 
 const char* bleUartState(void) {
     if (s_initErr) return "ble err";
+    if (!s_advOk) return "ble adv fail";
     if (!s_connected) return "ble adv";
     return "ble conn";
 }
@@ -95,11 +97,12 @@ static void adv_start(void) {
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
     int rc = ble_gap_adv_set_fields(&f);
-    if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); return; }
+    if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); s_advOk = 0; return; }
     adv.conn_mode = BLE_GAP_CONN_MODE_UND;   // 可连接
     adv.disc_mode = BLE_GAP_DISC_MODE_GEN;   // 可发现
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
-    if (rc != 0) { printf("[BLE] adv start err %d\n", rc); return; }
+    if (rc != 0) { printf("[BLE] adv start err %d\n", rc); s_advOk = 0; return; }
+    s_advOk = 1;
     printf("[BLE] 广播已启动：PavoLED\n");
 }
 
