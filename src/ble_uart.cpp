@@ -25,6 +25,7 @@
 static volatile int s_connected = 0;
 static uint16_t s_connHandle = 0; // 当前连接句柄（通知用）
 static uint16_t s_txHandle = 0;
+static volatile int s_initErr = 0; // BLE 初始化失败标记
 
 // NUS UUID：6E400001/2/3-B5A3-F393-E0A9-E50E24DCCA9E（128-bit LE 字节序）
 static const ble_uuid128_t nus_svc_uuid =
@@ -38,6 +39,7 @@ static const ble_uuid128_t nus_tx_uuid =
                      0x93, 0xF3, 0x93, 0xA3, 0xB5, 0x02, 0x40, 0x6E); // 通知（飞控->手机）
 
 const char* bleUartState(void) {
+    if (s_initErr) return "ble err";
     if (!s_connected) return "ble adv";
     return "ble conn";
 }
@@ -175,7 +177,12 @@ void bleUartInit(void) {
     // NimBLE 主机
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.reset_cb = on_reset;
-    nimble_port_init();
+    esp_err_t ret = nimble_port_init();
+    if (ret != ESP_OK) {
+        s_initErr = 1;
+        printf("[BLE] nimble_port_init FAIL %d\n", (int)ret);
+        return;
+    }
     ble_svc_gap_device_name_set("PavoLED");
     ble_svc_gap_init();
     ble_svc_gatt_init();

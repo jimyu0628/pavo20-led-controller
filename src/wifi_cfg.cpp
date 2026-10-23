@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "ota.h"
+#include "ble_uart.h"
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -55,11 +56,11 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
 static void touchHttp() { s_lastHttpUs = esp_timer_get_time(); }
 
 static void sendState(httpd_req_t* req) {
-    char buf[192];
+    char buf[256];
     snprintf(buf, sizeof(buf),
-             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\"}",
+             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\"}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
-             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion());
+             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(), bleUartState());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_sendstr(req, buf);
 }
@@ -126,9 +127,13 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>幻彩灯带控制板</h1>
+<h1>幻彩灯带控制板 <span id="ver" style="font-size:13px;color:#888">v32</span></h1>
 <div class="sub">WiFi 热点：RGBled · 密码 12345678 · 无操作 60 秒后自动关闭</div>
 <div id="st">加载中…</div>
+<label style="display:block;margin:6px 0;font-size:13px;color:#9be">
+ <input type="checkbox" id="dbgChk" onchange="toggleDbg()" style="width:20px;height:20px;vertical-align:middle;margin-right:6px">调试信息
+</label>
+<div id="dbg" style="display:none;background:#0c1a12;color:#8f9;font-family:monospace;font-size:12px;padding:8px 12px;border-radius:8px;margin:6px 0;white-space:pre-wrap;line-height:1.8"></div>
 
 <div class="card"><h3>模式</h3><div class="btns" id="modes"></div></div>
 <div class="card"><h3>颜色</h3><div class="btns" id="colors"></div></div>
@@ -164,12 +169,14 @@ var C=["白","红","黄","蓝","绿","青","品红","关"];
 var CS=["#fff","#f33","#ff3","#36f","#3f3","#0ff","#f3f","#000"];
 var S=["快","中","慢"];
 var B=["100%","75%","50%","25%"];
-var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v31"};
+var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:""};
 
 function render(){
+ var ve=document.getElementById("ver"); if(ve)ve.textContent=st.v;
  document.getElementById("st").textContent =
   "模式："+M[st.mode]+" · 颜色："+C[st.color]+" · 速度："+S[st.speed]+
   " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"")+" · 固件 "+st.v;
+ dbgRefresh();
  var c=document.getElementById("cnt"); if(c)c.value=st.calib;
  var mm=document.getElementById("modes"); mm.innerHTML="";
  for(var i=0;i<10;i++){var b=document.createElement("button");b.textContent=i+" "+M[i];
@@ -192,6 +199,16 @@ function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
 function offWifi(){if(confirm("确定关闭 WiFi？关闭后需重启设备才能重新开启。")){
  fetch("/api/wifi/off").then(function(){toast("WiFi 已关闭");setTimeout(function(){document.getElementById("btnOff").disabled=true;},300);});}}
 function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}
+function toggleDbg(){var d=document.getElementById("dbg");
+ if(document.getElementById("dbgChk").checked){d.style.display="block";dbgRefresh();}else d.style.display="none";}
+function dbgRefresh(){var d=document.getElementById("dbg");
+ if(!d||d.style.display=="none")return;
+ d.textContent="固件版本 : "+(st.v||"n/a")+
+  "\nWiFi 状态 : "+(st.ws||"n/a")+
+  "\nBLE 状态 : "+(st.ble||"n/a")+
+  "\n模式/颜色/速度/亮度 : "+st.mode+"/"+st.color+"/"+st.speed+"/"+st.bright+
+  "\nLED 数量 : "+st.calib+" 颗"+(st.cal?"（标定中）":"")+
+  "\n心跳 : "+JSON.stringify(st);}
 fetch("/api/state").then(function(r){return r.json();}).then(function(j){st=j;render();}).catch(function(){document.getElementById("st").textContent="连接失败";});
 </script>
 </body></html>)rawliteral";
@@ -330,7 +347,7 @@ void wifiCfgInit() {
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 10; // 5 现有 + 2 OTA + 余量
-    hc.stack_size = 8192;     // OTA 升级 handler 需较大栈
+    hc.stack_size = 4096;     // OTA handler 大缓冲均为 static，不占任务栈（省内存给 BLE）
     if (httpd_start(&s_httpd, &hc) == ESP_OK) {
         static const httpd_uri_t u_root  = {.uri="/",          .method=HTTP_GET, .handler=handler_root,  .user_ctx=NULL};
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
