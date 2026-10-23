@@ -42,6 +42,14 @@
 //   （主广播包已被 NUS 128-bit UUID + 名字占满 30/31 字节）。
 //   另外每条特征访问都会打印 h=句柄 与首字节，下次认不出设备时能直接看
 //   App 到底碰了哪个句柄。
+//
+// v32.9：v32.8 实测仍然 sub=0@0、tx=0、无任何 WR —— App 连上后依然只做 MTU
+//   协商就放弃，说明它对 FFE0/FFF0 也没认（或者根本没扫到）。两点调整：
+//   1) 把 FFE0/FFF0 挪进**主广播包**，NUS 的 128-bit UUID 挪到扫描响应。
+//      有些 App 只解析 adv data、不合并 scan response，按服务 UUID 过滤就漏
+//   2) 连接期间把 NimBLE 日志升到 DEBUG，ATT 层每个请求（Read By Group Type /
+//      Read By Type / Read / Write / CCCD）都会打出来；断开自动降回 INFO。
+//      再配一条「1.5s 无订阅」提示，下次日志能直接看出 App 停在哪一步。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -54,6 +62,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 #include "os/os_mbuf.h"
+#include "esp_log.h"
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
@@ -321,30 +330,41 @@ static void probeTask(void* arg) {
 // ---------------- 广播 ----------------
 static int gap_event(struct ble_gap_event* event, void* arg); // 前向声明
 
+// v32.9：连接后 1.5s 仍无订阅就给一句明确提示，省得对着一堆日志猜
+static void subWatchTask(void* arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    if (s_connected && !s_sub) {
+        printf("[BLE] 1.5s 内没有订阅（sub=0）：App 没找到/没启用任何通知特征\n");
+    }
+    vTaskDelete(NULL);
+}
+
 static void adv_start(void) {
     struct ble_gap_adv_params adv = {0};
     struct ble_hs_adv_fields f = {0};
     const char* devName = "PavoLED";
+    // v32.9：把 FFE0/FFF0 放进主广播包。有些 App（SpeedyBee 疑似属于这类）
+    // 只解析 adv data、不合并扫描响应，扫描时按服务 UUID 过滤就会漏掉我们。
+    // 主包：flags(3) + FFE0(4) + FFF0(4) + 名字(9) = 20 字节，安全。
+    // NUS 的 128-bit UUID(18 字节) 挪到扫描响应里。
+    static const ble_uuid16_t adv_uuids[] = { BLE_UUID16_INIT(0xFFE0),
+                                              BLE_UUID16_INIT(0xFFF0) };
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
-    f.uuids128 = &nus_svc_uuid;          // 广播带 NUS 服务 UUID（Betaflight Configurator 用）
-    f.num_uuids128 = 1;
-    f.uuids128_is_complete = 1;
+    f.uuids16 = adv_uuids;
+    f.num_uuids16 = 2;
+    f.uuids16_is_complete = 1;
     f.name = (uint8_t*)devName;
     f.name_len = (uint8_t)strlen(devName);
     f.name_is_complete = 1;
-    int rc = ble_gap_adv_set_fields(&f);   // 3 + 18 + 9 = 30 字节，刚好放得下
+    int rc = ble_gap_adv_set_fields(&f);
     if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); s_advOk = 0; return; }
 
-    // v32.8：主广播包 31 字节已被 NUS+名字占满，FFE0/FFF0 放扫描响应里。
-    // Android 会把 adv + scan response 合并成一条 scanRecord，按服务 UUID
-    // 过滤的 App（SpeedyBee 就属于这种）照样能扫到。
-    static const ble_uuid16_t rsp_uuids[] = { BLE_UUID16_INIT(0xFFE0),
-                                             BLE_UUID16_INIT(0xFFF0) };
     struct ble_hs_adv_fields rsp = {0};
     rsp.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    rsp.uuids16 = rsp_uuids;
-    rsp.num_uuids16 = 2;
-    rsp.uuids16_is_complete = 1;
+    rsp.uuids128 = &nus_svc_uuid;   // Betaflight Configurator / Web Bluetooth 用 NUS
+    rsp.num_uuids128 = 1;
+    rsp.uuids128_is_complete = 1;
     int rc2 = ble_gap_adv_rsp_set_fields(&rsp);
     if (rc2 != 0) printf("[BLE] adv rsp err %d（不影响连接）\n", rc2);
 
@@ -353,7 +373,7 @@ static void adv_start(void) {
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
     if (rc != 0) { printf("[BLE] adv start err %d\n", rc); s_advOk = 0; return; }
     s_advOk = 1;
-    printf("[BLE] 广播已启动：PavoLED（NUS + FFE0 + FFF0）\n");
+    printf("[BLE] 广播已启动：PavoLED（adv=FFE0/FFF0，rsp=NUS）\n");
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg) {
@@ -366,9 +386,14 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             s_sub = 0;
             s_subHandle = 0;
             s_dbgLeft = 40; // 每次连接打印前 40 条特征访问，便于看 App 碰了谁
+            // v32.9：连接期间把 NimBLE 主机日志调到 DEBUG，ATT 层每个请求
+            // （Read By Group Type / Read By Type / Read / Write / CCCD 写）
+            // 都会打出来。App 认不出设备时，这行日志能直接看出它到底停在哪一步
+            esp_log_level_set("NimBLE", ESP_LOG_DEBUG);
             printf("[BLE] 已连接（NUS wr=%u nt=%u | FFE1=%u | FFF1=%u FFF2=%u）\n",
                    (unsigned)s_wrHandle, (unsigned)s_ntHandle, (unsigned)s_ffHandle,
                    (unsigned)s_f0NtHandle, (unsigned)s_f0WrHandle);
+            xTaskCreate(subWatchTask, "bleSubW", 2048, NULL, 3, NULL);
             // 请求更快的连接参数：WiFi AP 同时在跑（单射频分时），
             // 连接间隔太大会让 MSP 回复迟到甚至被 supervision 超时踢掉
             struct ble_gap_upd_params up = {0};
@@ -388,6 +413,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         s_sub = 0;
         s_subHandle = 0;
         s_pendLen = 0; // 清掉上一轮的残包，避免污染下一次握手
+        esp_log_level_set("NimBLE", ESP_LOG_INFO); // 断开后关掉 ATT 追踪，别刷屏
         printf("[BLE] 断开（reason=0x%x），重新广播\n", event->disconnect.reason);
         adv_start();
         // App 走了再探测，避免干扰握手

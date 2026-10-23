@@ -7,6 +7,7 @@
 #include "esp_netif_ip_addr.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
+#include "esp_system.h"   // esp_restart
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "freertos/FreeRTOS.h"
@@ -111,6 +112,23 @@ static esp_err_t handler_off(httpd_req_t* req) {
     return ESP_OK;
 }
 
+// 软件重启：板载 RESET 键失效时的替代手段（实测该 C3 小板按 RST 不复位）
+static void rebootTask(void* arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(300)); // 先让 HTTP 响应发出去
+    printf("[SYS] /api/reboot → esp_restart()\n");
+    fflush(stdout);
+    esp_restart();
+}
+
+static esp_err_t handler_reboot(httpd_req_t* req) {
+    touchHttp();
+    httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
+    httpd_resp_sendstr(req, "{\"ok\":1,\"reboot\":1}");
+    xTaskCreate(rebootTask, "reboot", 2048, NULL, 6, NULL);
+    return ESP_OK;
+}
+
 // ---------- HTTP：主页（内嵌页面，手机适配） ----------
 static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 <html lang="zh">
@@ -164,6 +182,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 
 <div class="card">
  <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi（需重启才能重新开启）</button>
+ <button style="background:#1f3a52;border-color:#36c;margin-top:8px" onclick="rebootDev()">重启设备（RESET 键失效时用这个）</button>
 </div>
 <div class="card">
  <button style="background:#1f3a52;border-color:#36c" onclick="location.href='/ota'">固件升级（WiFi OTA）</button>
@@ -205,6 +224,8 @@ function setCount(){var n=parseInt(document.getElementById("cnt").value,10);
 function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
 function offWifi(){if(confirm("确定关闭 WiFi？关闭后需重启设备才能重新开启。")){
  fetch("/api/wifi/off").then(function(){toast("WiFi 已关闭");setTimeout(function(){document.getElementById("btnOff").disabled=true;},300);});}}
+function rebootDev(){if(confirm("确定重启设备？重启期间热点会断开，约 3 秒后恢复。")){
+ toast("正在重启…");fetch("/api/reboot").catch(function(){});}}
 function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}
 function toggleDbg(){var d=document.getElementById("dbg");
  if(document.getElementById("dbgChk").checked){d.style.display="block";dbgRefresh();}else d.style.display="none";}
@@ -366,11 +387,13 @@ void wifiCfgInit() {
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
         static const httpd_uri_t u_set   = {.uri="/api/set",   .method=HTTP_GET, .handler=handler_set,   .user_ctx=NULL};
         static const httpd_uri_t u_off   = {.uri="/api/wifi/off", .method=HTTP_GET, .handler=handler_off, .user_ctx=NULL};
+        static const httpd_uri_t u_rb    = {.uri="/api/reboot",   .method=HTTP_GET, .handler=handler_reboot, .user_ctx=NULL};
         static const httpd_uri_t u_capt  = {.uri="/*",         .method=HTTP_GET, .handler=handler_captive, .user_ctx=NULL};
         httpd_register_uri_handler(s_httpd, &u_root);
         httpd_register_uri_handler(s_httpd, &u_state);
         httpd_register_uri_handler(s_httpd, &u_set);
         httpd_register_uri_handler(s_httpd, &u_off);
+        httpd_register_uri_handler(s_httpd, &u_rb);
         httpd_register_uri_handler(s_httpd, &u_capt); // 通配放最后：精确路由优先
         otaHttpdRegister(s_httpd);                    // /ota 上传页 + /api/ota
         printf("[WiFi] 热点 RGBled 已开启（密码 12345678），5 分钟无连接自动关闭\n");
