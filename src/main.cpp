@@ -28,6 +28,7 @@
 #include "ota.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"   // esp_reset_reason / esp_restart
+#include "esp_wifi.h"     // v32.13：AP 发射功率限制（弱供电下保热点）
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) {
@@ -272,6 +273,17 @@ extern "C" void app_main(void) {
     ledOutInit();
     fcInputInit();
     wifiCfgInit(); // AP 热点 RGBled + Web 设置（30s 无连接自动关闭）
+    // v32.13：把 WiFi 发射功率从默认 ~20dBm 降到 10dBm。
+    // 现象「插上飞控串口线/LED 线热点就没了」最常见的原因是 5V 轨带不动 WiFi 发射的
+    // 峰值电流（300mA+）——电压被拉塌后要么 brownout 复位、要么射频校准失败起不了 AP。
+    // 10dBm 对 3~5 米手机调参完全够用，峰值电流大约减半。
+    {
+        esp_err_t tp = esp_wifi_set_max_tx_power(40); // 单位 0.25dBm → 40 = 10dBm
+        int8_t got = 0;
+        esp_wifi_get_max_tx_power(&got);
+        printf("[WiFi] TX 功率：%d/4 = %d dBm（设置 %s）\n",
+               (int)got, (int)got / 4, tp == ESP_OK ? "ok" : "fail");
+    }
     bleUartInit(); // BLE NUS 透传（SpeedyBee App 蓝牙调参）
     mspTcpInit();  // v32.10：MSP over TCP 5761，PC 端 BF Configurator 走 WiFi 直连
     // 开机自检：白灯闪 1s（肉眼确认灯带与信号链路；不经过亮度缩放，应是纯白）
@@ -290,10 +302,10 @@ extern "C" void app_main(void) {
     // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
     char bi[512];
     snprintf(bi, sizeof(bi),
-             "版本 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s",
+             "版本 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s | 复位原因 %d",
              otaVersion(), s_calibCount, currentRatio(), s_mode,
              __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
-             ledOutOk() ? "OK" : "FAIL");
+             ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason());
     wifiCfgSetBootInfo(bi);
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
