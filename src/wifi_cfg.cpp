@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_netif_ip_addr.h"
@@ -153,6 +154,18 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 </head>
 <body>
 <h1>幻彩灯带控制板 <span id="ver" style="font-size:13px;color:#888">v32</span></h1>
+<div class="card" style="border:2px solid #2d7ff9;background:#eef4ff">
+ <h3 style="margin-top:0;color:#15427f">飞控调参</h3>
+ <a href="https://app.betaflight.com" target="_blank" rel="noopener"
+    style="display:block;text-align:center;padding:16px 12px;background:#2d7ff9;color:#fff;border-radius:12px;font-size:18px;font-weight:700;text-decoration:none;box-shadow:0 4px 10px rgba(45,127,249,.35)">
+  打开 Betaflight 调参 &rarr;
+ </a>
+ <div style="font-size:12px;color:#555;margin-top:8px;line-height:1.7">
+  ① 首次使用请先在有网时打开一次，并在地址栏右侧点「安装」装成应用，之后连着本热点也能离线用；<br>
+  ② 蓝牙方式：系统蓝牙里连 <b>PavoLED</b>，再到页面里选蓝牙设备；<br>
+  ③ 电脑装桌面版的话，端口选 <code>Manual Selection</code>，填 <code>tcp://192.168.4.1</code>。
+ </div>
+</div>
 <div class="sub">WiFi 热点：RGBled · 密码 12345678 · 无操作 60 秒后自动关闭</div>
 <div id="st">加载中…</div>
 <label style="display:block;margin:6px 0;font-size:13px;color:#9be">
@@ -256,50 +269,65 @@ static esp_err_t handler_root(httpd_req_t* req) {
 // 劫持 DNS 应答为 AP 地址，配合 HTTP 302 重定向，手机自动弹出设置页。
 static void dnsTask(void* arg) {
     (void)arg;
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock < 0) { printf("[WiFi] dns socket FAIL\n"); vTaskDelete(NULL); return; }
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(53);
-    addr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
-        // 53 被占用：dhcps 可能已内置 DNS 应答，无需自建
-        printf("[WiFi] dns bind fail (dhcps DNS likely active)\n");
+    int sock = -1;
+    // v32.12：dhcps 起来前后可能短暂占端口，重试几次再放弃（原来一次失败就退出，
+    // 于是「DNS 劫持」一直显示 fail，手机连上热点永远不弹页面）
+    for (int i = 0; i < 20; i++) {
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock >= 0) {
+            struct sockaddr_in addr = {};
+            addr.sin_family = AF_INET;
+            addr.sin_port = htons(53);
+            addr.sin_addr.s_addr = INADDR_ANY;
+            if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) == 0) break;
+            close(sock);
+            sock = -1;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (sock < 0) {
+        printf("[WiFi] dns bind fail errno=%d\n", errno);
         s_dnsOk = 0;
-        close(sock);
         vTaskDelete(NULL);
         return;
     }
     s_dnsOk = 1;
     printf("[WiFi] DNS captive: 53 -> 192.168.4.1\n");
     char buf[512];
+    uint8_t out[600];
     for (;;) {
         struct sockaddr_in from = {};
         socklen_t fl = sizeof(from);
         int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fl);
         if (n < 12) continue;
-        uint16_t qd = (uint16_t)(((uint8_t)buf[4]) << 8 | (uint8_t)buf[5]);
-        if (qd == 0) continue;
+        // v32.12：按 QTYPE 分开应答——A 查询给 192.168.4.1，AAAA/其它回空(NOERROR)。
+        // 原来不分类型一律塞 A 记录，手机解析 AAAA 时对不上，网络探测反而失败。
         int pos = 12;
-        while (pos < n && buf[pos] != 0) pos += (uint8_t)buf[pos] + 1;
-        if (pos >= n) continue;
-        pos += 5; // 跳过 00 + QTYPE(2) + QCLASS(2)
-        if (pos > n || 12 + (pos - 12) + 16 > (int)sizeof(buf)) continue;
-        uint16_t nf = (uint16_t)(((uint8_t)buf[2]) << 8 | (uint8_t)buf[3]);
-        nf |= 0x8080; nf &= ~0x000F;  // QR=1 RA=1 RCODE=0
-        buf[2] = (uint8_t)(nf >> 8); buf[3] = (uint8_t)(nf & 0xFF);
-        buf[6] = 0; buf[7] = 1;   // ANCOUNT=1
-        buf[8] = 0; buf[9] = 0;   // NSCOUNT=0
-        buf[10] = 0; buf[11] = 0; // ARCOUNT=0
-        int p = pos;
-        buf[p++] = 0xC0; buf[p++] = 0x0C;              // 指针 → 问题名（offset 12）
-        buf[p++] = 0; buf[p++] = 1;                    // TYPE A
-        buf[p++] = 0; buf[p++] = 1;                    // CLASS IN
-        buf[p++] = 0; buf[p++] = 0; buf[p++] = 0; buf[p++] = 60; // TTL 60s
-        buf[p++] = 0; buf[p++] = 4;                    // RDLENGTH=4
-        uint32_t ip = htonl(0xC0A80101);               // 192.168.4.1
-        memcpy(buf + p, &ip, 4); p += 4;
-        sendto(sock, buf, p, 0, (struct sockaddr*)&from, fl);
+        while (pos < n && buf[pos] != 0) {
+            if (((uint8_t)buf[pos] & 0xC0) == 0xC0) { pos += 2; break; }
+            pos += (uint8_t)buf[pos] + 1;
+        }
+        if (pos < n && buf[pos] == 0) pos += 1;
+        if (pos + 4 > n) continue;
+        uint16_t qtype = (uint16_t)(((uint8_t)buf[pos]) << 8 | (uint8_t)buf[pos + 1]);
+        pos += 4;                                     // 跳过 QTYPE + QCLASS
+        int r = pos;
+        memcpy(out, buf, r);                          // 问题段原样回显
+        out[2] = 0x81; out[3] = 0x80;                 // QR=1 RD=1 RA=1 RCODE=0
+        int an = 0;
+        if (qtype == 1 && r + 16 <= (int)sizeof(out)) { // 只对 A 查询给地址
+            out[r++] = 0xC0; out[r++] = 0x0C;         // 指针 → 问题名（offset 12）
+            out[r++] = 0x00; out[r++] = 0x01;         // TYPE A
+            out[r++] = 0x00; out[r++] = 0x01;         // CLASS IN
+            out[r++] = 0x00; out[r++] = 0x00; out[r++] = 0x00; out[r++] = 30; // TTL 30s
+            out[r++] = 0x00; out[r++] = 0x04;         // RDLENGTH=4
+            out[r++] = 192; out[r++] = 168; out[r++] = 4; out[r++] = 1;
+            an = 1;
+        }
+        out[6] = 0; out[7] = (uint8_t)an;             // ANCOUNT
+        out[8] = 0; out[9] = 0;                       // NSCOUNT
+        out[10] = 0; out[11] = 0;                     // ARCOUNT
+        sendto(sock, out, r, 0, (struct sockaddr*)&from, fl);
     }
 }
 
@@ -310,10 +338,17 @@ static esp_err_t handler_captive(httpd_req_t* req) {
         return ESP_OK;
     }
     touchHttp();
-    // 绝对地址重定向：手机探测逻辑按完整 URL 判断是否 captive（相对地址部分机型不弹窗）
+    // 绝对地址重定向：手机探测逻辑按完整 URL 判断是否 captive（相对地址部分机型不弹窗）。
+    // v32.12：加 no-store，避免探测结果被缓存后第二次连热点不再弹窗。
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
-    httpd_resp_sendstr(req, "");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req,
+        "<html><meta http-equiv=\"refresh\" content=\"0;url=http://192.168.4.1/\">"
+        "<body style=\"font-family:sans-serif;text-align:center;padding-top:40px\">"
+        "<p>正在进入灯带控制板…</p><p><a href=\"http://192.168.4.1/\">点这里</a></p>"
+        "</body></html>");
     return ESP_OK;
 }
 
