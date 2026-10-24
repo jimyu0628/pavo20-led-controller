@@ -2,6 +2,7 @@
 .pio/
 .pioenvs/
 .piolibdeps/
+build.log
 
 # 固件构件
 *.bin
