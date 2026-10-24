@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>方案 C · 户外大按钮</title>
+<style>
+  :root{
+    --bg:#08090a; --card:#121417; --card2:#191c21; --edge:#262b32;
+    --txt:#f2f4f6; --dim:#8b939d; --mint:#19e3a5; --mint-d:#062a20; --mint-e:#0d6b52;
+    --warn:#ffb454;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);padding:12px 12px 118px;max-width:560px;margin:0 auto;
+       font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;font-size:16px}
+
+  /* 顶栏：极简一行 */
+  .bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 2px 12px}
+  .dev{font-size:12.5px;color:var(--dim);letter-spacing:.4px}
+  .dev b{color:var(--txt);font-weight:650;letter-spacing:0}
+  .live{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--mint);
+        border:1px solid var(--mint-e);background:var(--mint-d);padding:5px 10px;border-radius:6px;font-weight:600}
+  .live i{width:6px;height:6px;border-radius:50%;background:var(--mint)}
+
+  /* 现在状态：一块大牌子 */
+  .now{background:linear-gradient(160deg,#10302a,#0d1418 60%);border:1px solid #1b3f36;border-radius:14px;
+       padding:16px 16px 14px;margin-bottom:12px}
+  .now .k{font-size:11.5px;color:#5fbfa2;letter-spacing:2px;font-weight:700}
+  .now .m{font-size:31px;font-weight:800;letter-spacing:-.6px;margin:7px 0 12px;line-height:1.1}
+  .now .row{display:flex;gap:18px}
+  .now .row div{font-size:13px;color:var(--dim)}
+  .now .row b{display:block;font-size:20px;color:var(--txt);font-weight:700;margin-top:2px;
+              font-variant-numeric:tabular-nums}
+
+  h2{font-size:12.5px;color:#6d7681;letter-spacing:1.6px;font-weight:700;margin:0 0 10px;padding-left:2px}
+
+  /* 模式：2 列大格 */
+  .modes{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:16px}
+  .mode{min-height:66px;border-radius:11px;background:var(--card2);border:1.5px solid var(--edge);
+        color:#c2c9d2;font-size:13.5px;font-family:inherit;font-weight:600;line-height:1.35;
+        padding:6px 4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+        transition:.12s}
+  .mode .n{font-size:10.5px;color:#5d656f;font-weight:700;letter-spacing:1px}
+  .mode span{white-space:nowrap}
+  .mode:active{transform:scale(.97)}
+  .mode.on{background:var(--mint);border-color:var(--mint);color:#04160f;box-shadow:0 0 0 3px rgba(25,227,165,.16)}
+  .mode.on .n{color:#046b4c}
+
+  /* 亮度：4 个等宽大条 */
+  .bigrow{display:grid;gap:8px;margin-bottom:16px}
+  .bigrow.c4{grid-template-columns:repeat(4,1fr)}
+  .bigrow.c3{grid-template-columns:repeat(3,1fr)}
+  .bigrow button{min-height:66px;border-radius:11px;background:var(--card2);border:1.5px solid var(--edge);
+                 color:#c2c9d2;font-size:15px;font-family:inherit;font-weight:600;cursor:pointer;
+                 font-variant-numeric:tabular-nums;transition:.12s}
+  .bigrow button:active{transform:scale(.97)}
+  .bigrow button.on{background:var(--mint);border-color:var(--mint);color:#04160f;font-weight:800}
+
+  /* 颜色：大圆 */
+  .colors{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px;justify-items:center}
+  .sw{width:100%;aspect-ratio:1;max-width:76px;border-radius:50%;border:2px solid #2d333b;padding:0;
+      cursor:pointer;transition:.12s}
+  .sw:active{transform:scale(.93)}
+  .sw.on{border-color:var(--mint);box-shadow:0 0 0 4px rgba(25,227,165,.18)}
+  .sw.off{background:repeating-linear-gradient(45deg,#15181d 0 6px,#22262c 6px 12px)!important}
+
+  /* 灯数：超大 stepper */
+  .step{display:flex;align-items:stretch;gap:8px;margin-bottom:8px}
+  .step button{width:82px;min-height:70px;border-radius:12px;background:var(--card2);border:1.5px solid var(--edge);
+               color:var(--mint);font-size:28px;font-family:inherit;cursor:pointer;line-height:1}
+  .step .num{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+             background:#0d0f12;border:1.5px solid var(--edge);border-radius:12px}
+  .step .num b{font-size:32px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:-1px;line-height:1}
+  .step .num span{font-size:11px;color:var(--dim);margin-top:4px;letter-spacing:1.5px}
+  .quick{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:18px}
+  .quick button{min-height:44px;border-radius:9px;background:transparent;border:1.5px dashed #2b313a;
+                color:#8b939d;font-size:14px;font-family:inherit;cursor:pointer;font-variant-numeric:tabular-nums}
+  .quick button.on{border-style:solid;border-color:var(--mint-e);color:var(--mint);background:var(--mint-d)}
+
+  /* 底部固定大按钮 */
+  .dock{position:fixed;left:0;right:0;bottom:0;padding:10px 12px 14px;
+        background:linear-gradient(180deg,rgba(8,9,10,.4),rgba(8,9,10,.98) 22%);
+        display:grid;grid-template-columns:1.35fr 1fr;gap:9px;max-width:560px;margin:0 auto}
+  .dock a{display:flex;align-items:center;justify-content:center;gap:8px;min-height:58px;border-radius:12px;
+          text-decoration:none;font-size:15.5px;font-weight:750;letter-spacing:.3px;
+          background:var(--mint);color:#04160f;border:0}
+  .dock a.ghost{background:#15181d;color:#c2c9d2;border:1.5px solid var(--edge);font-weight:650}
+  .dock svg{width:18px;height:18px}
+  .idleline{position:fixed;bottom:80px;left:0;right:0;text-align:center;font-size:11.5px;color:#6d7681;
+            pointer-events:none;max-width:560px;margin:0 auto}
+  .idleline b{color:var(--warn);font-variant-numeric:tabular-nums}
+
+  #toast{position:fixed;left:50%;top:34%;transform:translate(-50%,-50%);background:#e9fbf4;color:#04321f;
+         font-size:15px;font-weight:750;padding:12px 22px;border-radius:8px;opacity:0;transition:.15s;
+         pointer-events:none;z-index:9;white-space:nowrap}
+  #toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="dev"><b>PavoLED-A3</b> &nbsp;·&nbsp; v32.21</div>
+  <div class="live"><i></i>在线</div>
+</div>
+
+<div class="now">
+  <div class="k">现在播放</div>
+  <div class="m" id="nowMode">双边跑马</div>
+  <div class="row">
+    <div>亮度<b id="nowB">50%</b></div>
+    <div>速度<b id="nowS">中</b></div>
+    <div>灯数<b id="nowC">55</b></div>
+  </div>
+</div>
+
+<h2>模式</h2>
+<div class="modes" id="modes"></div>
+
+<h2>亮度</h2>
+<div class="bigrow c4" id="brights"></div>
+
+<h2>速度</h2>
+<div class="bigrow c3" id="speeds"></div>
+
+<h2>颜色</h2>
+<div class="colors" id="colors"></div>
+
+<h2>灯带长度</h2>
+<div class="step">
+  <button onclick="bump(-1)">&minus;</button>
+  <div class="num"><b id="cntV">55</b><span>颗</span></div>
+  <button onclick="bump(1)">+</button>
+</div>
+<div class="quick" id="presets"></div>
+
+<div class="idleline">空闲 <b id="idle">00:42</b> 后自动关闭无线 · 只留灯带</div>
+
+<div class="dock">
+  <a href="https://app.betaflight.com" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 17l6-6 4 4 8-8"/><path d="M21 7v5h-5"/>
+    </svg>
+    飞控调参
+  </a>
+  <a class="ghost" href="#">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>
+    </svg>
+    升级
+  </a>
+</div>
+
+<div id="toast"></div>
+
+<script>
+var MODES=["飞控同步","常亮","呼吸","跑马","双边跑马","导向","增长","彩虹呼吸","彩虹渐变","双边彩虹"];
+var COLORS=[["白","#ffffff"],["红","#ff3b30"],["黄","#ffd60a"],["蓝","#3b82f6"],["绿","#22c55e"],["青","#22d3ee"],["品红","#e879f9"],["关","#000000"]];
+var SPEEDS=["快","中","慢"], BRIGHTS=["100","75","50","25"], PRESETS=[32,55,60,78];
+var st={mode:4,color:0,speed:1,bright:2,count:55};
+
+function E(t,c,h){var e=document.createElement(t);if(c)e.className=c;if(h!=null)e.innerHTML=h;return e;}
+
+function build(){
+  var m=document.getElementById("modes"); m.innerHTML="";
+  MODES.forEach(function(nm,i){
+    var b=E("button","mode"+(i==st.mode?" on":""));
+    b.innerHTML='<span class="n">'+("0"+i).slice(-2)+'</span><span>'+nm+'</span>';
+    b.onclick=function(){st.mode=i;build();sync();toast(nm);};
+    m.appendChild(b);
+  });
+  var br=document.getElementById("brights"); br.innerHTML="";
+  BRIGHTS.forEach(function(nm,i){
+    var b=E("button",i==st.bright?"on":"",nm+"<small style='font-size:11px'>%</small>");
+    b.onclick=function(){st.bright=i;build();sync();toast("亮度 "+nm+"%");};
+    br.appendChild(b);
+  });
+  var sp=document.getElementById("speeds"); sp.innerHTML="";
+  SPEEDS.forEach(function(nm,i){
+    var b=E("button",i==st.speed?"on":"",nm);
+    b.onclick=function(){st.speed=i;build();sync();toast("速度 "+nm);};
+    sp.appendChild(b);
+  });
+
+  var c=document.getElementById("colors"); c.innerHTML="";
+  COLORS.forEach(function(o,i){
+    var b=E("button","sw"+(i==st.color?" on":"")+(i==7?" off":""));
+    b.style.background=o[1]; b.title=o[0];
+    b.onclick=function(){st.color=i;build();sync();toast(o[0]);};
+    c.appendChild(b);
+  });
+
+  var p=document.getElementById("presets"); p.innerHTML="";
+  PRESETS.forEach(function(n){
+    var b=E("button",n==st.count?"on":"",String(n));
+    b.onclick=function(){st.count=n;build();sync();toast("灯数 "+n);};
+    p.appendChild(b);
+  });
+}
+function sync(){
+  document.getElementById("nowMode").textContent=MODES[st.mode];
+  document.getElementById("nowB").textContent=BRIGHTS[st.bright]+"%";
+  document.getElementById("nowS").textContent=SPEEDS[st.speed];
+  document.getElementById("nowC").textContent=st.count;
+  document.getElementById("cntV").textContent=st.count;
+}
+function bump(d){var n=st.count+d; if(n<1)n=1; if(n>128)n=128; st.count=n; build(); sync();}
+var tt=null;
+function toast(t){
+  var d=document.getElementById("toast"); d.textContent=t; d.classList.add("show");
+  clearTimeout(tt); tt=setTimeout(function(){d.classList.remove("show");},1300);
+}
+var left=42;
+setInterval(function(){
+  left=left>0?left-1:60;
+  document.getElementById("idle").textContent="00:"+(left<10?"0":"")+left;
+},1000);
+
+build(); sync();
+</script>
+</body>
+</html>
