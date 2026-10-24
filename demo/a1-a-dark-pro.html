@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
-<title>方案 A+ · 直选 + 拖动</title>
+<title>方案 A+ · 标签式调参</title>
 <style>
   :root{
     --bg:#0b0b0d; --card:#17171a; --card2:#1e1e22; --line:#2a2a30;
@@ -13,7 +13,8 @@
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   body{margin:0;background:var(--bg);color:var(--txt);
        font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-       padding:14px 14px 116px;max-width:560px;margin:0 auto;font-size:15px}
+       padding:14px 14px 112px;max-width:560px;margin:0 auto;font-size:15px;
+       display:flex;flex-direction:column;min-height:100vh}
 
   /* 顶栏 */
   header{display:flex;align-items:center;gap:11px;padding:2px 2px 12px}
@@ -31,29 +32,44 @@
   /* 吸顶预览 */
   .preview{position:sticky;top:0;z-index:6;background:var(--bg);
            margin:0 -14px 10px;padding:6px 14px 9px;border-bottom:1px solid #191920}
-  .preview canvas{display:block;width:100%;height:66px;background:#07070a;
+  .preview canvas{display:block;width:100%;height:64px;background:#07070a;
                   border-radius:10px;border:1px solid #23232a;
                   box-shadow:inset 0 0 26px rgba(0,0,0,.9)}
   .pvi{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:7px;min-height:18px}
-  .pvi .pm{color:var(--amber);font-weight:700;font-size:13px;letter-spacing:.2px}
+  .pvi .pm{color:var(--amber);font-weight:700;font-size:13px;letter-spacing:.2px;white-space:nowrap}
   .pvi .pd{font-size:11px;color:var(--dim2);font-variant-numeric:tabular-nums;
-           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right}
+  .pvi .pd b{color:#c08a3e;font-weight:600}
 
-  /* 状态三格 */
-  .stats{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:8px;margin-bottom:11px}
-  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:9px 11px}
-  .stat .k{font-size:10.5px;color:var(--dim2);letter-spacing:.4px}
-  .stat .v{font-size:15px;font-weight:650;margin-top:3px;white-space:nowrap;
-           overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
-  .stat .v.acc{color:var(--amber)}
+  /* ================= 标签式状态栏 ================= */
+  .tabbar{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:10px}
+  .tab{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;
+       gap:3px;min-height:54px;padding:7px 3px 8px;border-radius:11px;
+       background:var(--card);border:1px solid var(--line);color:inherit;font-family:inherit;
+       cursor:pointer;transition:background .13s,border-color .13s,transform .1s}
+  .tab:active{transform:scale(.975)}
+  .tab .tk{font-size:10px;color:var(--dim2);letter-spacing:.2px;white-space:nowrap;line-height:1}
+  .tab .tv{font-size:13.5px;font-weight:700;line-height:1.15;color:#d9d9e2;
+           font-variant-numeric:tabular-nums;white-space:nowrap;
+           max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:0 1px}
+  .tab.on{background:var(--amber-d);border-color:#8a6320;
+          box-shadow:inset 0 0 0 1px rgba(255,180,84,.18)}
+  .tab.on .tk{color:#c9974a}
+  .tab.on .tv{color:var(--amber)}
+  .tab .d2{position:absolute;top:5px;right:6px;width:5px;height:5px;border-radius:50%;
+           background:var(--amber);box-shadow:0 0 7px rgba(255,180,84,.9);display:none}
+  .tab.dirty .d2{display:block}
 
-  /* 卡片 */
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 13px 12px;margin-bottom:10px}
-  .card h2{font-size:12.5px;margin:0 0 4px;color:var(--dim);font-weight:600;letter-spacing:.6px;
-           display:flex;align-items:center;justify-content:space-between;gap:8px}
-  .card h2 .hint{font-size:11px;color:var(--dim2);font-weight:400;letter-spacing:0}
-  .card h2 .val{font-size:13px;color:var(--amber);font-weight:700;letter-spacing:0;
-                font-variant-numeric:tabular-nums;white-space:nowrap}
+  /* ================= 调整页 ================= */
+  .panelbox{background:var(--card);border:1px solid var(--line);border-radius:14px;
+            padding:11px 13px 13px;margin-bottom:10px;min-height:150px}
+  .panel{display:none}
+  .panel.show{display:block;animation:pin .16s ease-out}
+  @keyframes pin{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+  .phead{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:2px 0 4px}
+  .phead .pt{font-size:12.5px;color:var(--dim);font-weight:600;letter-spacing:.6px}
+  .phead .pv{font-size:13.5px;color:var(--amber);font-weight:700;letter-spacing:0;
+             font-variant-numeric:tabular-nums;white-space:nowrap}
 
   /* 模式网格 */
   .modes{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px}
@@ -92,55 +108,66 @@
   .rail .ends{display:flex;justify-content:space-between;margin-top:5px;
               font-size:10.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
 
-  /* 色相轨道 */
-  .rail.hue .rt{background:linear-gradient(90deg,
-      hsl(0,100%,50%),hsl(45,100%,50%),hsl(90,100%,50%),hsl(135,100%,50%),
-      hsl(180,100%,50%),hsl(225,100%,50%),hsl(270,100%,50%),hsl(315,100%,50%),hsl(360,100%,50%));
-      border-color:#33333b}
-  .rail.hue .rf,.rail.hue .rticks{display:none}
-  .rail.hue .rk{width:5px;background:#fff;top:1px;bottom:1px;
-                box-shadow:0 0 0 1.5px rgba(0,0,0,.6),0 0 12px rgba(255,255,255,.7)}
+  /* 灯带长度：左右加减 */
+  .stepwrap{display:flex;align-items:center;gap:9px}
+  .stepwrap .rail{flex:1;min-width:0}
+  .stp{width:46px;height:46px;flex:0 0 auto;border-radius:11px;background:var(--card2);
+       border:1px solid #2c2c34;color:#d6d6de;font-family:inherit;font-size:23px;font-weight:600;
+       line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;
+       transition:background .1s,transform .1s,color .1s}
+  .stp:active{background:#2b2b35;transform:scale(.95);color:#fff}
+  .stp.off{opacity:.3;pointer-events:none}
 
-  /* 色块 */
-  .colors{display:grid;grid-template-columns:repeat(8,1fr);gap:9px;margin-top:11px}
-  .sw{width:100%;aspect-ratio:1;border-radius:50%;border:2px solid #3a3a44;padding:0;
-      cursor:pointer;position:relative;transition:transform .12s,box-shadow .12s;
-      box-shadow:inset 0 0 0 1px rgba(0,0,0,.3)}
-  .sw:active{transform:scale(.93)}
-  .sw.on{border-color:#fff;transform:scale(1.08);box-shadow:0 0 0 3px rgba(255,255,255,.14)}
+  /* 颜色：只点选 */
+  .colors{display:grid;grid-template-columns:repeat(4,1fr);gap:11px 9px;margin-top:12px}
+  .sw{background:none;border:0;padding:0;display:flex;flex-direction:column;align-items:center;
+      gap:6px;cursor:pointer;font-family:inherit}
+  .sw i{display:block;width:100%;aspect-ratio:1;border-radius:50%;border:2px solid #3a3a44;
+        box-shadow:inset 0 0 0 1px rgba(0,0,0,.35);transition:transform .12s,box-shadow .12s,border-color .12s}
+  .sw:active i{transform:scale(.93)}
+  .sw.on i{border-color:#fff;transform:scale(1.04);box-shadow:0 0 0 3px rgba(255,255,255,.15)}
+  .sw span{font-size:10.5px;color:var(--dim2);line-height:1}
+  .sw.on span{color:var(--amber);font-weight:600}
 
-  /* 分隔 */
-  .sep{height:1px;background:#212127;margin:6px 0 2px}
+  /* 提示 / 其它 */
+  .tip{display:flex;gap:6px;align-items:flex-start;font-size:11.5px;color:#8d8d97;
+       background:#131317;border-radius:8px;padding:7px 9px;line-height:1.55;margin-top:10px}
+  .tip b{color:var(--amber);font-weight:600}
 
-  /* 操作按钮 */
-  .actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:10px}
-  .btn{display:flex;align-items:center;justify-content:center;gap:7px;min-height:54px;border-radius:12px;
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:10px;margin-top:auto}
+  .btn{display:flex;align-items:center;justify-content:center;gap:7px;min-height:50px;border-radius:12px;
        text-decoration:none;font-size:14px;font-weight:600;border:1px solid #2c2c34;
        background:var(--card2);color:#d6d6de}
   .btn svg{width:17px;height:17px;flex:0 0 auto}
   .btn.primary{background:linear-gradient(180deg,#3488ff,#2069e0);border-color:#4f97ff;color:#fff;
                box-shadow:0 6px 18px rgba(45,127,249,.28)}
   .warn{font-size:11.5px;color:#c08a3e;background:#1c1408;border-left:2px solid #7a5410;
-        padding:8px 10px;border-radius:0 8px 8px 0;line-height:1.7;margin-bottom:10px}
+        padding:8px 10px;border-radius:0 8px 8px 0;line-height:1.7}
 
-  /* 底部空闲条 */
-  .idlebar{position:fixed;left:0;right:0;bottom:0;background:rgba(14,14,16,.96);backdrop-filter:blur(10px);
-           border-top:1px solid var(--line);padding:9px 16px;
-           display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--dim)}
-  .idlebar b{color:var(--amber);font-variant-numeric:tabular-nums}
-  .idlebar .bar{flex:1;height:3px;background:#242429;border-radius:3px;overflow:hidden;margin:0 4px}
-  .idlebar .bar i{display:block;height:100%;width:62%;background:var(--amber);border-radius:3px;transition:width 1s linear}
+  /* ================= 底部应用条 ================= */
+  .applybar{position:fixed;left:0;right:0;bottom:0;z-index:12;max-width:560px;margin:0 auto;
+            background:rgba(13,13,16,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line);
+            padding:9px 14px calc(9px + env(safe-area-inset-bottom));
+            display:flex;align-items:center;gap:11px}
+  .abinfo{flex:1;min-width:0}
+  .abinfo .l1{font-size:12.5px;font-weight:600;color:var(--dim);white-space:nowrap;
+              overflow:hidden;text-overflow:ellipsis}
+  .abinfo .l1 b{color:var(--amber);font-variant-numeric:tabular-nums}
+  .abinfo .l2{font-size:10.5px;color:var(--dim2);margin-top:3px;white-space:nowrap;
+              overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+  .apply{flex:0 0 auto;min-width:118px;min-height:46px;border-radius:12px;border:1px solid #3a3a44;
+         background:#22222a;color:#7d7d88;font-family:inherit;font-size:14.5px;font-weight:700;
+         letter-spacing:.5px;cursor:default;transition:background .15s,color .15s,box-shadow .15s,transform .1s}
+  .apply.hot{background:linear-gradient(180deg,#ffc06a,#f0a03c);border-color:#ffcf8a;color:#241503;
+             cursor:pointer;box-shadow:0 6px 18px rgba(255,180,84,.3)}
+  .apply.hot:active{transform:scale(.97)}
+  .apply.hot::after{content:"";display:inline-block;width:0}
+  .apply.busy{background:#2b2b35;color:#c9c9d2;border-color:#3a3a44}
 
-  #toast{position:fixed;left:50%;bottom:66px;transform:translateX(-50%) translateY(16px);
+  #toast{position:fixed;left:50%;bottom:86px;transform:translateX(-50%) translateY(16px);
          background:#f0f0f4;color:#111;font-size:12.5px;font-weight:600;padding:8px 15px;border-radius:20px;
          opacity:0;transition:.2s;pointer-events:none;white-space:nowrap;z-index:20}
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-
-  /* 用法提示条 */
-  .tip{display:flex;gap:6px;align-items:flex-start;font-size:11.5px;color:#8d8d97;
-       background:#131317;border-radius:8px;padding:7px 9px;
-       line-height:1.55;margin-top:8px}
-  .tip b{color:var(--amber);font-weight:600}
 </style>
 </head>
 <body>
@@ -162,62 +189,69 @@
   <div class="live"><span class="dot"></span>在线 1</div>
 </header>
 
-<!-- 吸顶预览：拖下面任何滑块，这里立刻能看到光效 -->
+<!-- 吸顶预览：改哪一项这里立刻预演，点应用才写进灯带 -->
 <div class="preview">
   <canvas id="cv"></canvas>
   <div class="pvi">
     <span class="pm" id="pvMode">导向</span>
-    <span class="pd" id="pvDesc">亮度 55% · 速度 55 · 55 颗</span>
+    <span class="pd" id="pvDesc">亮度 55% · 速度 55 · 55 颗 · 琥珀</span>
   </div>
 </div>
 
-<div class="stats">
-  <div class="stat"><div class="k">当前模式</div><div class="v acc" id="sMode">导向</div></div>
-  <div class="stat"><div class="k">亮度</div><div class="v" id="sBright">55%</div></div>
-  <div class="stat"><div class="k">灯数</div><div class="v" id="sCount">55</div></div>
-</div>
+<!-- ===== 标签式状态栏：点哪格，下面换成哪一页 ===== -->
+<div class="tabbar" id="tabbar"></div>
 
-<div class="card">
-  <h2>灯光模式 <span class="hint">点选即时生效</span></h2>
-  <div class="modes" id="modes"></div>
-</div>
+<!-- ===== 调整页 ===== -->
+<div class="panelbox">
+  <!-- 模式 -->
+  <section class="panel" data-k="mode">
+    <div class="phead"><span class="pt">灯光模式</span><span class="pv" id="vMode">导向</span></div>
+    <div class="modes" id="modes"></div>
+  </section>
 
-<div class="card">
-  <h2>亮度 <span class="val" id="hBright">55%</span></h2>
-  <div class="rail" id="railBright">
-    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
-    <div class="rb">55%</div>
-    <div class="ends"><span>0</span><span>100</span></div>
-  </div>
-  <div class="sep"></div>
-  <h2>速度 <span class="val" id="hSpd">中 55</span></h2>
-  <div class="rail" id="railSpd">
-    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
-    <div class="rb">55</div>
-    <div class="ends"><span>很慢</span><span>很快</span></div>
-  </div>
-  <div class="tip"><span>·</span><span><b>点方块</b> = 直接跳到该档；<b>按住任意位置左右拖</b> = 无级微调。拖动时看上方灯带。</span></div>
-</div>
+  <!-- 亮度 -->
+  <section class="panel" data-k="bright">
+    <div class="phead"><span class="pt">亮度</span><span class="pv" id="vBright">55%</span></div>
+    <div class="rail" id="railBright">
+      <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+      <div class="rb">55%</div>
+      <div class="ends"><span>0 关灯</span><span>100 最亮</span></div>
+    </div>
+    <div class="tip"><span>·</span><span><b>点方块</b>直选档位，<b>按住左右拖</b>无级微调。</span></div>
+  </section>
 
-<div class="card">
-  <h2>颜色 <span class="val" id="hHue">琥珀</span></h2>
-  <div class="rail hue" id="railHue">
-    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
-    <div class="rb">32°</div>
-    <div class="ends"><span>0°</span><span>360°</span></div>
-  </div>
-  <div class="colors" id="colors"></div>
-  <div class="tip"><span>·</span><span>彩虹类模式不受这里的颜色影响，会自己循环变色。</span></div>
-</div>
+  <!-- 速度 -->
+  <section class="panel" data-k="spd">
+    <div class="phead"><span class="pt">速度</span><span class="pv" id="vSpd">中 55</span></div>
+    <div class="rail" id="railSpd">
+      <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+      <div class="rb">55</div>
+      <div class="ends"><span>很慢</span><span>很快</span></div>
+    </div>
+    <div class="tip"><span>·</span><span>常亮模式不用速度；呼吸、跑马、彩虹类才看得出差别。</span></div>
+  </section>
 
-<div class="card">
-  <h2>灯带长度 <span class="val" id="hCount">55 颗</span></h2>
-  <div class="rail" id="railCount">
-    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
-    <div class="rb">55 颗</div>
-    <div class="ends"><span>1</span><span>128</span></div>
-  </div>
-  <div class="tip"><span>·</span><span>改完断电记忆；灯带实际颗数要比这里设定的多，最后一段不亮才正常。</span></div>
+  <!-- 颜色（只点选） -->
+  <section class="panel" data-k="color">
+    <div class="phead"><span class="pt">颜色</span><span class="pv" id="vHue">琥珀</span></div>
+    <div class="colors" id="colors"></div>
+    <div class="tip"><span>·</span><span>彩虹类模式自己循环变色，不受这里影响。</span></div>
+  </section>
+
+  <!-- 灯带长度（轨道 + 左右精调） -->
+  <section class="panel" data-k="count">
+    <div class="phead"><span class="pt">灯带长度（颗数）</span><span class="pv" id="vCount">55 颗</span></div>
+    <div class="stepwrap">
+      <button class="stp" id="cntMinus" aria-label="减少一颗">−</button>
+      <div class="rail" id="railCount">
+        <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+        <div class="rb">55 颗</div>
+        <div class="ends"><span>1</span><span>128</span></div>
+      </div>
+      <button class="stp" id="cntPlus" aria-label="增加一颗">+</button>
+    </div>
+    <div class="tip"><span>·</span><span>轨道粗调，<b>长按 − / +</b> 一颗一颗精调。实际颗数要比这里多，末尾不亮属正常。</span></div>
+  </section>
 </div>
 
 <div class="actions">
@@ -240,9 +274,13 @@
   app.betaflight.com 并「添加到主屏幕」；或用蓝牙连同名设备调参。
 </div>
 
-<div class="idlebar">
-  <span>无线空闲 <b id="idle">00:42</b> 后自动关闭</span>
-  <span class="bar"><i id="idlebar"></i></span>
+<!-- ===== 底部：待应用状态 + 应用按钮 ===== -->
+<div class="applybar">
+  <div class="abinfo">
+    <div class="l1" id="abL1">灯带已是最新</div>
+    <div class="l2">无线空闲 <span id="idle">00:42</span> 后自动关闭</div>
+  </div>
+  <button class="apply" id="applyBtn">应用</button>
 </div>
 
 <div id="toast"></div>
@@ -263,7 +301,17 @@ var COLORS = [
   {n:"品红", h:292, s:100, css:"#e879f9"}
 ];
 
-var st = { mode:5, hue:32, sat:100, bright:55, spd:55, count:55 };
+/* base = 灯带上正在跑的那套参数；st = 界面里正在改的那套 */
+var base = { mode:5, hue:32, sat:100, bright:55, spd:55, count:55 };
+var st   = { mode:5, hue:32, sat:100, bright:55, spd:55, count:55 };
+
+var TABS = [
+  {k:"mode",   n:"当前模式"},
+  {k:"bright", n:"亮度"},
+  {k:"spd",    n:"速度"},
+  {k:"color",  n:"颜色"},
+  {k:"count",  n:"灯带长度"}
+];
 
 /* ================= 工具 ================= */
 function $(id){ return document.getElementById(id); }
@@ -275,41 +323,65 @@ function spdLabel(v){
   if(v < 85) return "快";
   return "很快";
 }
-function nameOfHue(v){
-  for(var i=0;i<COLORS.length;i++){
-    var c = COLORS[i];
-    if(c.h >= 0 && Math.abs(c.h - v) <= 3) return c.n;
-  }
-  return "";
-}
 function hueName(){
   if(st.sat === 0) return "白";
   for(var i=0;i<COLORS.length;i++){
     var c = COLORS[i];
-    if(c.h >= 0 && st.sat > 0 && Math.abs(c.h - st.hue) <= 5) return c.n;
+    if(c.h >= 0 && st.sat > 0 && Math.abs(c.h - st.hue) <= 2) return c.n;
   }
-  return "自定义 " + st.hue + "°";
+  return st.hue + "°";
+}
+function tabVal(k){
+  if(k === "mode")   return MODES[st.mode];
+  if(k === "bright") return st.bright + "%";
+  if(k === "spd")    return st.spd + "";
+  if(k === "color")  return hueName();
+  return st.count + " 颗";
+}
+function isDirty(k){
+  if(k === "color") return st.hue !== base.hue || st.sat !== base.sat;
+  return st[k] !== base[k];
+}
+function dirtyList(){
+  var out = [];
+  for(var i=0;i<TABS.length;i++) if(isDirty(TABS[i].k)) out.push(TABS[i]);
+  return out;
 }
 
-/* ================= 顶部信息同步 ================= */
-function syncInfo(){
-  $("sMode").textContent   = MODES[st.mode];
-  $("sBright").textContent = st.bright + "%";
-  $("sCount").textContent  = st.count;
-  $("pvMode").textContent  = MODES[st.mode];
-  $("pvDesc").textContent  = "亮度 " + st.bright + "% · 速度 " + st.spd +
-                             " · " + st.count + " 颗 · " + hueName();
-  $("hBright").textContent = st.bright + "%";
-  $("hSpd").textContent    = spdLabel(st.spd) + " " + st.spd;
-  $("hCount").textContent  = st.count + " 颗";
-  $("hHue").textContent    = hueName();
-  renderSw();
+/* ================= 标签栏 ================= */
+var tabEls = {};
+function buildTabs(){
+  var box = $("tabbar");
+  box.innerHTML = "";
+  for(var i=0;i<TABS.length;i++){
+    (function(t){
+      var b = document.createElement("button");
+      b.className = "tab";
+      b.innerHTML = '<span class="tk">' + t.n + '</span><span class="tv"></span><i class="d2"></i>';
+      b.onclick = function(){ selectTab(t.k); };
+      box.appendChild(b);
+      tabEls[t.k] = b;
+    })(TABS[i]);
+  }
+}
+
+var curTab = "mode";
+function selectTab(k){
+  curTab = k;
+  var panelBox = document.querySelectorAll(".panel");
+  for(var i=0;i<panelBox.length;i++){
+    panelBox[i].classList.toggle("show", panelBox[i].getAttribute("data-k") === k);
+  }
+  for(var key in tabEls) tabEls[key].classList.toggle("on", key === k);
+  /* 切到某一页时把该页的轨道重绘一次（隐藏时宽度量不到，但百分比不受影响） */
+  for(var r in rails){ if(rails[r] && rails[r]._render) rails[r]._render(); }
 }
 
 /* ================= 通用轨道 =================
-   cfg: {id, min, max, ticks:[], get(), set(v), fmt(v), hint(el)}
-   交互：pointerdown 立即跳到该位置；按住左右拖 = 连续调整
+   cfg: {id, min, max, ticks:[], get(), set(v), fmt(v)}
+   pointerdown 立即跳到该点；按住左右拖 = 连续调整
    ============================================ */
+var rails = {};
 function makeRail(cfg){
   var box    = $(cfg.id);
   var track  = box.querySelector(".rt");
@@ -322,7 +394,6 @@ function makeRail(cfg){
   function pct(v){ return span === 0 ? 0 : (v - cfg.min) / span; }
   function fromPct(p){ return Math.round(cfg.min + p * span); }
 
-  /* 生成刻度方块（可视为"直选档位"） */
   var ticks = [];
   if(cfg.ticks){
     for(var k=0;k<cfg.ticks.length;k++){
@@ -331,7 +402,7 @@ function makeRail(cfg){
       d.className = "tick";
       var lp = pct(v) * 100;
       d.style.left = lp.toFixed(3) + "%";
-      /* 贴在轨道两端的方块如果还做 -50% 位移，一半会被 overflow 裁掉，看起来往里缩 */
+      /* 贴两端的方块不再 -50% 位移，否则一半被 overflow 裁掉 */
       d.style.transform = "translate(" + (lp < 2 ? "0" : (lp > 98 ? "-100%" : "-50%")) + ",-50%)";
       tickBox.appendChild(d);
       ticks.push({v:v, el:d});
@@ -344,15 +415,12 @@ function makeRail(cfg){
     if(fill) fill.style.width = (p*100).toFixed(2) + "%";
     knob.style.left = (p*100).toFixed(2) + "%";
     if(bubble) bubble.textContent = cfg.fmt(v);
-    /* 离当前值最近的那个方块点亮 —— 拖到两档之间也能看出落在哪一档 */
     var best = -1, bd = 1e9;
     for(var i=0;i<ticks.length;i++){
       var dd = Math.abs(ticks[i].v - v);
       if(dd < bd){ bd = dd; best = i; }
     }
-    for(var i=0;i<ticks.length;i++){
-      ticks[i].el.classList.toggle("on", i === best);
-    }
+    for(var i=0;i<ticks.length;i++) ticks[i].el.classList.toggle("on", i === best);
   }
 
   var dragging = false;
@@ -364,10 +432,10 @@ function makeRail(cfg){
   function put(v){
     if(v !== cfg.get()){
       cfg.set(v);
-      if(navigator.vibrate) { try{ navigator.vibrate(6); }catch(e){} }
+      if(navigator.vibrate){ try{ navigator.vibrate(6); }catch(e){} }
     }
     render();
-    syncInfo();
+    syncAll();
   }
 
   box.addEventListener("pointerdown", function(e){
@@ -392,20 +460,13 @@ function makeRail(cfg){
   box.addEventListener("pointercancel", stop);
 
   box._render = render;
+  box._put = put;
   render();
+  rails[cfg.id] = box;
   return box;
 }
 
-/* ================= 色块 ================= */
-function renderSw(){
-  var box = $("colors");
-  for(var i=0;i<box.children.length;i++){
-    var c = COLORS[i], b = box.children[i];
-    var on = (c.h < 0) ? (st.sat === 0)
-                       : (st.hue === c.h && st.sat > 0);
-    b.classList.toggle("on", on);
-  }
-}
+/* ================= 颜色（只点选） ================= */
 function buildColors(){
   var box = $("colors");
   box.innerHTML = "";
@@ -413,17 +474,24 @@ function buildColors(){
     (function(c){
       var b = document.createElement("button");
       b.className = "sw";
-      b.style.background = c.css;
-      b.title = c.n;
+      b.innerHTML = '<i style="background:' + c.css + '"></i><span>' + c.n + '</span>';
       b.onclick = function(){
         st.sat = c.s;
         if(c.h >= 0) st.hue = c.h;
-        railHue._render();
-        syncInfo();
+        if(navigator.vibrate){ try{ navigator.vibrate(6); }catch(e){} }
+        syncAll();
         toast("颜色：" + c.n);
       };
       box.appendChild(b);
     })(COLORS[i]);
+  }
+}
+function renderColors(){
+  var box = $("colors");
+  for(var i=0;i<box.children.length;i++){
+    var c = COLORS[i];
+    var on = (c.h < 0) ? (st.sat === 0) : (st.hue === c.h && st.sat > 0);
+    box.children[i].classList.toggle("on", on);
   }
 }
 
@@ -434,78 +502,181 @@ function buildModes(){
   for(var i=0;i<MODES.length;i++){
     (function(i){
       var b = document.createElement("button");
-      b.className = "mode" + (i === st.mode ? " on" : "");
-      b.innerHTML = '<span class="n">' + ("0"+i).slice(-2) + "</span><span>" + MODES[i] + "</span>";
+      b.className = "mode";
+      b.innerHTML = '<span class="n">' + ("0"+i).slice(-2) + '</span><span>' + MODES[i] + '</span>';
       b.onclick = function(){
         st.mode = i;
-        var bs = box.children;
-        for(var k=0;k<bs.length;k++) bs[k].classList.toggle("on", k === i);
-        syncInfo();
-        toast("模式：" + MODES[i]);
+        if(navigator.vibrate){ try{ navigator.vibrate(6); }catch(e){} }
+        syncAll();
       };
       box.appendChild(b);
     })(i);
   }
 }
+function renderModes(){
+  var bs = $("modes").children;
+  for(var k=0;k<bs.length;k++) bs[k].classList.toggle("on", k === st.mode);
+}
 
-/* ================= 灯带预览（Canvas） =================
-   每帧算出每颗灯的色相/饱和/亮度，拖滑块立即可见
-   ==================================================== */
+/* ================= 灯带长度：− / + 长按连发 ================= */
+function stepCount(d){
+  var v = clamp(st.count + d, 1, 128);
+  if(v === st.count) return;
+  st.count = v;
+  if(navigator.vibrate){ try{ navigator.vibrate(5); }catch(e){} }
+  syncAll();
+}
+function holdBtn(el, fn){
+  var t1 = null, t2 = null;
+  function start(e){
+    e.preventDefault();
+    fn();
+    t1 = setTimeout(function(){ t2 = setInterval(fn, 110); }, 430);
+  }
+  function end(){ clearTimeout(t1); clearInterval(t2); }
+  el.addEventListener("pointerdown", start);
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+  el.addEventListener("pointerleave", end);
+}
+
+/* ================= 统一刷新 ================= */
+var dirtyCache = [];
+function syncAll(){
+  var i, t;
+
+  /* 标签：当前值 + 选中态 + 未应用小圆点 */
+  dirtyCache = dirtyList();
+  for(i=0;i<TABS.length;i++){
+    t = TABS[i];
+    var el = tabEls[t.k];
+    if(!el) continue;
+    el.querySelector(".tv").textContent = tabVal(t.k);
+    el.classList.toggle("on", t.k === curTab);
+    el.classList.toggle("dirty", isDirty(t.k));
+  }
+
+  /* 预览 */
+  $("pvMode").textContent = MODES[st.mode];
+  $("pvDesc").innerHTML = (dirtyCache.length ? "<b>预演中</b> · " : "") +
+      "亮度 " + st.bright + "% · 速度 " + st.spd + " · " + st.count + " 颗 · " + hueName();
+
+  /* 各页头部数值 */
+  $("vMode").textContent   = MODES[st.mode];
+  $("vBright").textContent = st.bright + "%";
+  $("vSpd").textContent    = spdLabel(st.spd) + " " + st.spd;
+  $("vHue").textContent    = hueName();
+  $("vCount").textContent  = st.count + " 颗";
+
+  renderModes();
+  renderColors();
+  if(rails.railBright) rails.railBright._render();
+  if(rails.railSpd)    rails.railSpd._render();
+  if(rails.railCount)  rails.railCount._render();
+
+  /* 加减按钮到边界变灰 */
+  $("cntMinus").classList.toggle("off", st.count <= 1);
+  $("cntPlus").classList.toggle("off", st.count >= 128);
+
+  /* 底部应用条 */
+  var btn = $("applyBtn");
+  if(!applying){
+    if(dirtyCache.length){
+      /* 一两项就把名字写出来，多了只报数量（哪几项看标签上的小圆点） */
+      var msg = '待应用 <b>' + dirtyCache.length + '</b> 项改动';
+      if(dirtyCache.length <= 2){
+        var names = [];
+        for(i=0;i<dirtyCache.length;i++) names.push(dirtyCache[i].n);
+        msg = '待应用 <b>' + dirtyCache.length + '</b> 项：' + names.join("、");
+      }
+      $("abL1").innerHTML = msg;
+      btn.textContent = "应用";
+      btn.className = "apply hot";
+    }else{
+      $("abL1").textContent = "灯带已是最新";
+      btn.textContent = "应用";
+      btn.className = "apply";
+    }
+  }
+}
+
+/* ================= 应用（上传） ================= */
+var applying = false;
+function doApply(){
+  if(applying || !dirtyCache.length) return;
+  applying = true;
+  var btn = $("applyBtn");
+  btn.className = "apply busy";
+  btn.textContent = "上传中…";
+  $("abL1").textContent = "正在写入灯带…";
+  if(navigator.vibrate){ try{ navigator.vibrate([10,40,10]); }catch(e){} }
+
+  /* 真机上这里是一次 POST /api/set，成功后回读；演示用 600ms 模拟 */
+  setTimeout(function(){
+    base = { mode:st.mode, hue:st.hue, sat:st.sat,
+             bright:st.bright, spd:st.spd, count:st.count };
+    applying = false;
+    syncAll();
+    toast("已应用到灯带");
+  }, 600);
+}
+
+/* ================= 灯带预览（Canvas） ================= */
 function px(i, n, t){
-  var per  = Math.max(300, 2400 - st.spd * 21);   /* 周期 ms：速度越大越快 */
-  var ph   = (t % per) / per;                     /* 0..1 */
+  var per  = Math.max(300, 2400 - st.spd * 21);
+  var ph   = (t % per) / per;
   var d    = Math.max(1, n - 1);
   var h = st.hue, s = st.sat, v = 1;
 
   switch(st.mode){
-    case 0: { /* 飞控同步：无数据时的低亮扫描 */
+    case 0: {
       var q = ((t / 2600) % 1);
       var dd0 = Math.abs(i / d - q);
       v = 0.14 + 0.86 * Math.exp(-dd0 * dd0 * 90);
       break;
     }
-    case 1: v = 1; break;                                  /* 常亮 */
-    case 2: v = 0.06 + 0.94 * (0.5 + 0.5 * Math.sin(ph * 6.2832 - 1.5708)); break; /* 呼吸 */
-    case 3: { /* 跑马：单点环绕 */
+    case 1: v = 1; break;
+    case 2: v = 0.06 + 0.94 * (0.5 + 0.5 * Math.sin(ph * 6.2832 - 1.5708)); break;
+    case 3: {
       var p3 = ph * n;
       var dd3 = Math.abs(i - p3); dd3 = Math.min(dd3, n - dd3);
       v = Math.exp(-dd3 * dd3 * 0.9);
       break;
     }
-    case 4: { /* 双边跑马：两头相向 */
+    case 4: {
       var p1 = ph * n, p2 = (1 - ph) * n;
       var a1 = Math.abs(i - p1), a2 = Math.abs(i - p2);
       v = Math.max(Math.exp(-a1*a1*0.9), Math.exp(-a2*a2*0.9));
       break;
     }
-    case 5: { /* 导向：彗星带尾（头在最前，尾巴拖在后面） */
+    case 5: {
       var p5 = ph * n;
-      var dd5 = (i - p5 + n) % n;   /* i 比头靠后就小 → 亮；靠前就大 → 暗 */
+      var dd5 = (i - p5 + n) % n;
       var tail = n * 0.45;
       v = dd5 < tail ? Math.pow(1 - dd5 / tail, 2.0) : 0;
       break;
     }
-    case 6: { /* 增长：长满再收回 */
+    case 6: {
       var k = ph < 0.55 ? ph / 0.55 : 1 - (ph - 0.55) / 0.45;
       v = (i / d) <= k ? 1 : 0.02;
       break;
     }
-    case 7: /* 彩虹呼吸 */
+    case 7:
       h = i / d * 360;
       v = 0.08 + 0.92 * (0.5 + 0.5 * Math.sin(ph * 6.2832));
       break;
-    case 8: /* 彩虹渐变流动 */
+    case 8:
       h = (i / d * 360 + ph * 360) % 360;
       v = 1;
       break;
-    case 9: /* 双边彩虹：中间向两端对称 */
+    case 9:
       h = Math.abs(2 * i / d - 1) * 360;
       v = 1;
       break;
   }
 
   v *= st.bright / 100;
-  if(st.mode >= 7) s = 100;              /* 彩虹类强制高饱和 */
+  if(st.mode >= 7) s = 100;
   return [h, s, v];
 }
 
@@ -534,7 +705,6 @@ function drawStrip(t){
     var c = px(i, n, t);
     var v = c[2];
 
-    /* 底座：未点亮时的暗点，让灯带颗数一目了然 */
     g.beginPath();
     g.arc(x, cy, Math.max(r, 1), 0, 6.2832);
     g.fillStyle = "rgba(255,255,255,0.075)";
@@ -572,12 +742,11 @@ function toast(t){
 }
 
 /* ================= 初始化 ================= */
-var railBright, railSpd, railHue, railCount;
-
+buildTabs();
 buildModes();
 buildColors();
 
-railBright = makeRail({
+makeRail({
   id:"railBright", min:0, max:100,
   ticks:[0,10,20,30,40,50,60,70,80,90,100],
   get:function(){ return st.bright; },
@@ -585,7 +754,7 @@ railBright = makeRail({
   fmt:function(v){ return v + "%"; }
 });
 
-railSpd = makeRail({
+makeRail({
   id:"railSpd", min:1, max:100,
   ticks:[1,25,50,75,100],
   get:function(){ return st.spd; },
@@ -593,15 +762,7 @@ railSpd = makeRail({
   fmt:function(v){ return spdLabel(v) + " " + v; }
 });
 
-railHue = makeRail({
-  id:"railHue", min:0, max:359,
-  ticks:[],
-  get:function(){ return st.hue; },
-  set:function(v){ st.hue = v; st.sat = 100; },
-  fmt:function(v){ var nm = nameOfHue(v); return (nm ? nm + " · " : "") + v + "°"; }
-});
-
-railCount = makeRail({
+makeRail({
   id:"railCount", min:1, max:128,
   ticks:[1,16,32,55,80,110,128],
   get:function(){ return st.count; },
@@ -609,7 +770,12 @@ railCount = makeRail({
   fmt:function(v){ return v + " 颗"; }
 });
 
-syncInfo();
+holdBtn($("cntMinus"), function(){ stepCount(-1); });
+holdBtn($("cntPlus"),  function(){ stepCount(+1); });
+$("applyBtn").addEventListener("click", doApply);
+
+selectTab("mode");
+syncAll();
 requestAnimationFrame(loop);
 
 /* 空闲倒计时（演示：60 秒循环） */
@@ -617,7 +783,6 @@ var left = 42;
 setInterval(function(){
   left = left > 0 ? left - 1 : 60;
   $("idle").textContent = "00:" + (left < 10 ? "0" : "") + left;
-  $("idlebar").style.width = (left / 60 * 100) + "%";
 }, 1000);
 </script>
 </body>
