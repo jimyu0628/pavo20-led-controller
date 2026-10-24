@@ -63,21 +63,33 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
     }
 }
 
-// v32.15：强制把软 AP 的 DHCP option 6（DNS）设成本机 192.168.4.1。
-// 这是 captive portal 最容易翻车的一环：如果手机拿到的 DNS 是外部地址，
-// 它就直接向外解析域名，永远不会来敲我们的 53 端口 —— 表现就是
-// 「心跳 dns:1（劫持在跑）、但手机既不弹窗也打不开页面、[CP] 一条日志都没有」。
+// v32.15：强制让软 AP 通过 DHCP 把「DNS 服务器 = 本机 192.168.4.1」下发给手机。
+// 这是 captive portal 最容易翻车的一环：手机若拿到外部 DNS，就直接向外解析域名，
+// 永远不会来敲我们的 53 端口 —— 表现就是「心跳 dns:1（劫持在跑）、手机既不弹窗、
+// 手动打开也白屏、[CP] 一条日志都没有」。
+//
+// 注意 IDF 4.4 的坑：`ESP_NETIF_DOMAIN_NAME_SERVER` 在 dhcps 侧**不是地址**，
+// 而是一个 uint8 布尔开关（OFFER_DNS，"要不要下发 DNS"）。地址必须走
+// `esp_netif_set_dns_info(ESP_NETIF_DNS_MAIN)`；两者都要在 dhcps 停止状态下改。
 static esp_err_t forceDnsToSelf(esp_netif_t* apn) {
     if (!apn) return ESP_FAIL;
     esp_netif_ip_info_t ip = {};
     esp_err_t e = esp_netif_get_ip_info(apn, &ip);
     if (e != ESP_OK) return e;
-    esp_netif_dhcps_stop(apn);   // 改 option 前必须先停 dhcps，否则返回 INVALID_STATE
-    esp_ip4_addr_t dns = ip.ip;
+
+    esp_netif_dhcps_stop(apn); // 改选项/地址前必须先停 dhcps，否则返回 ALREADY_STARTED
+
+    uint8_t offer = 1; // OFFER_DNS：允许下发 DNS 服务器
     e = esp_netif_dhcps_option(apn, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
-                               &dns, sizeof(dns));
+                               &offer, sizeof(offer));
+
+    esp_netif_dns_info_t dns = {};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = ip.ip.addr;
+    esp_err_t e2 = esp_netif_set_dns_info(apn, ESP_NETIF_DNS_MAIN, &dns);
+
     esp_netif_dhcps_start(apn);
-    return e;
+    return (e == ESP_OK && e2 == ESP_OK) ? ESP_OK : (e != ESP_OK ? e : e2);
 }
 
 // v32.14：查询当前连在热点上的设备数（>0 = 手机在线，绝不自动关热点）
