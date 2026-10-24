@@ -38,8 +38,12 @@ static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
 // v32.14：自动关闭策略大改。以前的「5 分钟无访问就关」太短——插线、找热点、翻网页
 // 很容易超过 5 分钟，用户看到的就是「热点莫名其妙没了」。
 // 新规则：只要有设备连在热点上就永不自动关；全部断开后才开始计时。
-#define OFF_NO_HTTP_MS 1800000  // 保活期内、全部设备断开且 30 分钟无 HTTP 访问才关（原 5 分钟）
-#define OFF_NO_STA_MS   900000  // 上电后 15 分钟仍没有任何设备连过则关（原 5 分钟）
+// v32.20：改成「一分钟不用就关」——用户要的是开机后没人来调参就彻底断电省电，
+// 不是挂在那儿等。判定口径见 wifiCfgPoll：没有手机连热点、没有 HTTP 请求、
+// 没有蓝牙连接，三者同时安静满 60 秒才动手。
+#define IDLE_OFF_MS     60000   // 无线闲置阈值：60 秒
+#define OFF_NO_HTTP_MS 1800000 // 保留给「诊断串」显示剩余时间的老口径，逻辑上已不参与判定
+#define OFF_NO_STA_MS   1800000
 
 static httpd_handle_t s_httpd = NULL;
 static volatile bool  s_wifiUp = false;
@@ -50,6 +54,8 @@ static volatile int   s_staCount = 0;       // v32.14：当前连在热点上的
 static volatile uint32_t s_dnsQ = 0;        // v32.15：累计收到的 DNS 查询数（排查劫持是否真被用到）
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
+static volatile uint64_t s_lastActUs  = 0; // v32.20：最后一次「有人在用无线」的时刻（µs）
+static volatile bool s_pwrTaskRun = false; // v32.20：关闭任务是否已在跑（防重复创建）
 static char s_cfgStr[64];                  // 启动时缓存 "SSID/IP" 供心跳显示（SSID 最长 32 + IP 15 + 前缀后缀，64 防截断警告）
 
 // ---------- 内部 ----------
@@ -101,7 +107,11 @@ static int staOnline() {
 }
 
 // ---------- HTTP：JSON 状态 ----------
-static void touchHttp() { s_lastHttpUs = esp_timer_get_time(); }
+static void touchHttp() {
+    uint64_t t = esp_timer_get_time();
+    s_lastHttpUs = t;
+    s_lastActUs  = t; // v32.20：网页有请求就算「在用」，闲置计时归零
+}
 
 static void sendState(httpd_req_t* req) {
     // v32.5：boot 最多 512 字节，原 640 缓冲放全套字段会截断 JSON（网页白屏），放宽到 1024
@@ -244,7 +254,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 </div>
 
 <div class="card">
- <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi（需重启才能重新开启）</button>
+ <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi 和蓝牙（省电，需重启才能恢复）</button>
 </div>
 <div class="card">
  <button style="background:#1f3a52;border-color:#36c" onclick="location.href='/ota'">固件升级（WiFi OTA）</button>
@@ -284,8 +294,25 @@ function set(k,n){fetch("/api/set?"+k+"="+n).then(function(r){return r.json();})
 function setCount(){var n=parseInt(document.getElementById("cnt").value,10);
  if(!n||n<1||n>128){toast("请输入 1-128");return;}set("count",n);}
 function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
-function offWifi(){if(confirm("确定关闭 WiFi？关闭后需重启设备才能重新开启。")){
- fetch("/api/wifi/off").then(function(){toast("WiFi 已关闭");setTimeout(function(){document.getElementById("btnOff").disabled=true;},300);});}}
+// v32.20：不再用 confirm()。手机的内置浏览器（尤其是连热点时被拉起的那个
+// captive portal 认证页）经常把原生 confirm 直接拦掉、或者悄悄返回 false，
+// 表现就是「点了关闭 WiFi 但热点还在」——请求压根没发出去。
+// 改成按钮自己两段式：第一次点变成「再点一次确认」，4 秒内不点就复原。
+var offArm=0, offT=null;
+function offWifi(){
+ var b=document.getElementById("btnOff");
+ if(!offArm){
+   offArm=1;
+   b.textContent="再点一次，确认关闭";
+   b.style.background="#c62828";
+   offT=setTimeout(function(){offArm=0;b.textContent="关闭 WiFi 和蓝牙（省电，需重启才能恢复）";b.style.background="";},4000);
+   return;
+ }
+ clearTimeout(offT); offArm=0;
+ b.disabled=true; b.textContent="正在关闭 WiFi 和蓝牙…";
+ toast("正在关闭，热点和蓝牙会一起消失");
+ fetch("/api/wifi/off").catch(function(){});
+}
 function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}
 function toggleDbg(){var d=document.getElementById("dbg");
  if(document.getElementById("dbgChk").checked){d.style.display="block";dbgRefresh();}else d.style.display="none";}
@@ -358,6 +385,13 @@ static void dnsTask(void* arg) {
         struct sockaddr_in from = {};
         socklen_t fl = sizeof(from);
         int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fl);
+        // v32.20：WiFi 关掉后这个 socket 会失效，recvfrom 立刻返回 -1。
+        // 原来这里 `if (n < 12) continue;` 会变成死循环空转，把一个核吃满，
+        // 灯带刷新直接掉帧、严重时触发看门狗。必须睡一下。
+        if (n <= 0) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
         if (n < 12) continue;
         s_dnsQ++;                                     // v32.15：统计收到的 DNS 查询数（q=）
         // v32.12：按 QTYPE 分开应答——A 查询给 192.168.4.1，AAAA/其它回空(NOERROR)。
@@ -450,19 +484,57 @@ static esp_err_t handler_captive_err(httpd_req_t* req, httpd_err_code_t err) {
     return handler_captive(req);
 }
 
-// ---------- 关闭全部（httpd + wifi） ----------
-static void wifiStopAll() {
-    if (!s_wifiUp) return;
-    s_stopping = true;
-    if (s_httpd) {
-        httpd_stop(s_httpd);
-        s_httpd = NULL;
+// ---------- 关闭全部（httpd + wifi + BLE） ----------
+// v32.20：以前的实现有三个问题，全部修掉——
+//   ① 每一步都不看返回码，esp_wifi_stop() 失败也照样打印「热点已关闭」，
+//      于是网页点了没反应、日志却说成功，完全没法查；
+//   ② s_stopping 在动作之前就置 true，一旦中途失败就再也不重试，热点永久挂着；
+//   ③ 直接在主循环（wifiCfgPoll）里调 httpd_stop()，它会等所有 keep-alive 连接
+//      收尾（浏览器每秒轮询 /api/state），主循环被卡住，灯带刷新跟着掉帧。
+//      现在关闭动作放独立任务里做。
+static void shutdownTask(void* arg) {
+    (void)arg;
+    // 先给 HTTP 响应留时间发出去，否则网页端看不到「已关闭」的提示
+    vTaskDelay(pdMS_TO_TICKS(500));
+    wifiStopAll();
+    bleUartStop(); // 一起关：用户要的是「只剩灯带功能」
+    printf("[PWR] WiFi 与蓝牙已关闭，只剩灯带功能；重启设备可恢复\n");
+    s_pwrTaskRun = false;
+    vTaskDelete(NULL);
+}
+
+static void shutdownRequest(const char* why) {
+    if (s_pwrTaskRun) return;
+    s_pwrTaskRun = true;
+    s_stopping   = true; // 立刻冻结判定，避免每秒重复触发
+    printf("[PWR] 关闭无线，原因：%s\n", why);
+    if (xTaskCreate(shutdownTask, "pwrOff", 3072, NULL, 4, NULL) != pdPASS) {
+        printf("[PWR] 关闭任务创建失败，保持原状\n");
+        s_pwrTaskRun = false;
+        s_stopping   = false;
     }
-    esp_wifi_stop();
-    esp_wifi_deinit();
-    s_wifiUp = false;
+}
+
+static void wifiStopAll() {
+    if (!s_wifiUp && !s_httpd) return;
+
+    esp_err_t e1 = ESP_OK;
+    if (s_httpd) {
+        e1 = httpd_stop(s_httpd);
+        s_httpd = NULL; // 无论成败都置空：已经 stop 过一次，不能重复调
+    }
+    esp_err_t e2 = esp_wifi_stop();
+    esp_err_t e3 = ESP_OK;
+    if (e2 == ESP_OK) {
+        e3 = esp_wifi_deinit();
+    } else if (e2 == ESP_ERR_WIFI_NOT_INIT || e2 == ESP_ERR_WIFI_NOT_STARTED) {
+        e2 = ESP_OK; // 本来就没起来，视作已关闭
+    }
+
+    s_wifiUp   = false;
     s_cfgStr[0] = 0;
-    printf("[WiFi] 热点已关闭\n");
+    printf("[WiFi] 已关闭（httpd=%d wifi_stop=%d wifi_deinit=%d）\n",
+           (int)e1, (int)e2, (int)e3);
 }
 
 // ---------- 初始化 ----------
@@ -517,6 +589,7 @@ void wifiCfgInit() {
     s_wifiUp = true;
     s_startUs = esp_timer_get_time();
     s_lastHttpUs = s_startUs;
+    s_lastActUs  = s_startUs; // v32.20：闲置从 AP 起来这一刻算起
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 12; // 6 现有 + 2 OTA + 余量
@@ -580,35 +653,40 @@ const char* wifiCfgStr() {
 }
 
 // ---------- 每秒判定关闭 ----------
+// v32.20：判定口径换成「一分钟没人用就关 WiFi + 蓝牙」。
+// 什么算「在用」——三选一，任一成立都把闲置计时归零：
+//   ① 有手机连在热点上（staOnline > 0）
+//   ② 网页有请求（touchHttp 会刷新 s_lastActUs，页面每秒轮询就守得住）
+//   ③ 蓝牙连着（bleUartActive，调到一半不能被掐）
+// 光广播不算在用，否则蓝牙一开着闲置计时就永远被顶住，永远关不掉。
 void wifiCfgPoll(uint32_t nowMs) {
     (void)nowMs;
-    if (!s_wifiUp || s_stopping) return;
+    if (s_stopping) return; // 正在关闭，别再判
 
-    if (s_offRequested) { // 网页点击"关闭 WiFi"
-        wifiStopAll();
+    if (s_offRequested) { // 网页点了「关闭 WiFi」
+        s_offRequested = false;
+        shutdownRequest("网页手动关闭");
         return;
     }
+
+    if (!s_wifiUp && !bleUartActive()) return; // 都关了，没什么可判
+
     uint64_t nowUs = esp_timer_get_time();
 
-    // v32.14：只要还有设备连在热点上，就绝不自动关（并持续刷新两个计时器）
-    int n = staOnline();
+    // 热点已经停了就别再问驱动要 STA 列表（deinit 之后这调用只会返回错误）
+    int n = s_wifiUp ? staOnline() : 0;
     s_staCount = n;
-    if (n > 0) {
+
+    if (n > 0 || bleUartActive()) { // ① 或 ③：有人在用，无限续期
         s_everConnected = true;
-        s_lastHttpUs = nowUs;
-        s_startUs    = nowUs;
+        s_lastActUs = nowUs;
         return;
     }
 
-    uint64_t sinceHttp = (nowUs - s_lastHttpUs) / 1000;
-    uint64_t sinceStart = (nowUs - s_startUs) / 1000;
-
-    if (!s_everConnected) {
-        // 从未有手机连接：上电 15 分钟后仍没人来，关掉省电
-        if (sinceStart > OFF_NO_STA_MS) wifiStopAll();
-    } else {
-        // 曾连接（保持期）：全部设备断开后 30 分钟无访问才关
-        if (sinceHttp > OFF_NO_HTTP_MS) wifiStopAll();
+    // ②③ 都不成立，看距离上次「用过」多久了（touchHttp 已经算过 ②）
+    uint64_t idleMs = (nowUs - s_lastActUs) / 1000;
+    if (idleMs > IDLE_OFF_MS) {
+        shutdownRequest("无线闲置满 60 秒");
     }
 }
 
@@ -621,12 +699,11 @@ const char* wifiCfgDiag() {
     }
     int n = s_staCount;
     int left = -1;
-    if (n == 0) {
+    // v32.20：统一按「闲置满 60 秒关」算剩余，口径只有一套，不再区分首次/保活期
+    if (n == 0 && !bleUartActive()) {
         uint64_t nowUs = esp_timer_get_time();
-        uint64_t limit = s_everConnected ? OFF_NO_HTTP_MS : OFF_NO_STA_MS;
-        uint64_t used  = s_everConnected ? (nowUs - s_lastHttpUs) / 1000
-                                         : (nowUs - s_startUs) / 1000;
-        left = (used >= limit) ? 0 : (int)((limit - used) / 1000);
+        uint64_t used  = (nowUs - s_lastActUs) / 1000;
+        left = (used >= IDLE_OFF_MS) ? 0 : (int)((IDLE_OFF_MS - used) / 1000);
     }
     snprintf(d, sizeof(d), "sta=%d off=%d dq=%u", n, left, (unsigned)s_dnsQ);
     return d;

@@ -118,6 +118,7 @@ static volatile int s_nfLastErr = 0;   // 最后一次 notify 错误码
 static volatile int s_mtu = 23;        // 当前 MTU（默认 23）
 static volatile int s_sub = 0;         // CCCD 是否已订阅
 static volatile int s_probe = -1;      // MSP 探测：-1 未测 / 0 飞控无回复 / 1 有回复
+static volatile int s_bleOn = 0;       // v32.20：BLE 是否在跑（1=广播/连接中，0=已关闭省电）
 
 // 未订阅期间暂存的飞控回包（订阅一开就补发）
 #define PEND_CAP 512
@@ -128,6 +129,38 @@ static volatile uint32_t s_pendMs = 0;
 uint32_t bleUartTxCount(void) { return s_uartTx; }
 uint32_t bleUartRxCount(void) { return s_uartRx; }
 int bleUartProbe(void) { return s_probe; }
+
+// v32.20：闲置判定只看「有没有手机连着」，光在广播不算活跃——
+// 否则只要没关 BLE，闲置计时永远被广播状态顶住，热点和蓝牙就永远关不掉。
+int bleUartActive(void) { return (s_bleOn && s_connected) ? 1 : 0; }
+
+// v32.20：关闭 BLE 省电。顺序很重要：
+//   1) 先断连接（否则 nimble_port_stop 会等连接事件收尾）
+//   2) 停广播
+//   3) 停 host 任务、反初始化协议栈
+// 关掉之后 uart_rx_task 仍在跑（TCP 通道还要用 UART1），
+// 但 s_connected 已清零，不会再调 notify——协议栈已卸载，再调就崩。
+void bleUartStop(void) {
+    if (!s_bleOn) return;
+    s_bleOn = 0;
+    int wasConn = s_connected;
+
+    if (s_connected && s_connHandle) {
+        ble_gap_terminate(s_connHandle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    s_connected  = 0;
+    s_sub        = 0;
+    s_subHandle  = 0;
+    s_connHandle = 0;
+
+    ble_gap_adv_stop();
+    s_advOk = 0;
+
+    int r1 = nimble_port_stop();
+    esp_err_t r2 = nimble_port_deinit();
+    printf("[BLE] 已关闭（原连接=%d stop=%d deinit=%d）——重启才能恢复\n",
+           wasConn, r1, (int)r2);
+}
 
 // 心跳/网页用的一行诊断串
 // 用双缓冲交替：心跳（主任务）和 /api/state（httpd 任务）会并发调用，
@@ -180,6 +213,7 @@ static const ble_uuid16_t abf_wr_uuid  = BLE_UUID16_INIT(0xABF1);
 static const ble_uuid16_t abf_nt_uuid  = BLE_UUID16_INIT(0xABF2);
 
 const char* bleUartState(void) {
+    if (!s_bleOn) return "ble off"; // v32.20：闲置超时或网页主动关闭
     if (s_initErr) return "ble err";
     if (!s_advOk) return "ble adv fail";
     if (!s_connected) return "ble adv";
@@ -578,6 +612,7 @@ void bleUartInit(void) {
     ble_gatts_add_svcs(gatt_svcs);
     nimble_port_freertos_init(host_task);
 
+    s_bleOn = 1; // v32.20：从这里开始才算「蓝牙在跑」，闲置计时才能判
     xTaskCreate(uart_rx_task, "bleuart", 3072, NULL, 5, NULL);
     // 开机 5s 自动探测一次飞控（此时飞控已启动完），结果进心跳/网页调试区
     xTaskCreate([](void*) {

@@ -328,7 +328,7 @@ extern "C" void app_main(void) {
         // 0) 发送心跳：每秒打印 TX/RX 状态与统计（错误码每秒重复，防截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
-            wifiCfgPoll(now); // 每秒：判定关闭 WiFi（有人在线不关 / 断开后 30 分钟无访问才关）
+            wifiCfgPoll(now); // 每秒：无线闲置满 60 秒就关 WiFi + 蓝牙（有人在用/有请求/蓝牙连着则续期）
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();

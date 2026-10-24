@@ -26,3 +26,12 @@ uint32_t bleUartRxCount(void);
 
 // MSP 探测结果：-1 未测 / 0 飞控无回复 / 1 飞控有回复
 int bleUartProbe(void);
+
+// v32.20：是否处于「可被手机用到」的状态（广播中或已连接）。
+// 闲置判定用它——蓝牙连着就别自动关，否则调到一半被断电很难受。
+int bleUartActive(void);
+
+// v32.20：关闭 BLE（停广播、断连接、释放 NimBLE），省电用。
+// 只是省电，不影响灯带：飞控 LED 数据走 GPIO4 中断解码，跟 UART1/BLE 无关。
+// 关掉后要 esp_restart() 才能恢复。
+void bleUartStop(void);
