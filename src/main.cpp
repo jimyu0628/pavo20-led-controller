@@ -48,7 +48,7 @@ static void delayMs(uint32_t ms) {
 static void logMsg(const char* fmt, ...) {
     // v32.5：160 字节太小——心跳整行 180+ 字符会被 vsnprintf 截断，
     // 导致 [MSP]/[RX] 后半段永远打不出来（排查时看不到关键字段）
-    char buf[400];
+    char buf[448];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -272,7 +272,7 @@ extern "C" void app_main(void) {
     buttonInit();
     ledOutInit();
     fcInputInit();
-    wifiCfgInit(); // AP 热点 RGBled + Web 设置（30s 无连接自动关闭）
+    wifiCfgInit(); // AP 热点 RGBled + Web 设置（v32.14：有人在线不自动关，断开后 30 分钟无访问才关）
     // v32.13：把 WiFi 发射功率从默认 ~20dBm 降到 10dBm。
     // 现象「插上飞控串口线/LED 线热点就没了」最常见的原因是 5V 轨带不动 WiFi 发射的
     // 峰值电流（300mA+）——电压被拉塌后要么 brownout 复位、要么射频校准失败起不了 AP。
@@ -286,10 +286,18 @@ extern "C" void app_main(void) {
     }
     bleUartInit(); // BLE NUS 透传（SpeedyBee App 蓝牙调参）
     mspTcpInit();  // v32.10：MSP over TCP 5761，PC 端 BF Configurator 走 WiFi 直连
-    // 开机自检：白灯闪 1s（肉眼确认灯带与信号链路；不经过亮度缩放，应是纯白）
-    for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(255, 255, 255);
+    // 开机自检：v32.14 从「全白 255 亮 1s」改为「低亮度绿色 300ms」。
+    // 20 颗 WS2812 全白 255 峰值约 1.2A，BEC 上会瞬时压降；绿色单通道 + 约 16% 占空
+    // 峰值只剩 60mA 左右（约 1/20），既能肉眼看清灯带通电，又不会拉扯 5V 轨。
+    for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(0, 40, 20);
     refreshStrip();
-    delayMs(1000);
+    delayMs(300);
+    for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+    refreshStrip();
+    delayMs(120); // 再闪一下做个"心跳"，确认刷新正常（总耗电仍可忽略）
+    for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(0, 40, 20);
+    refreshStrip();
+    delayMs(120);
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
@@ -317,13 +325,13 @@ extern "C" void app_main(void) {
         // 0) 发送心跳：每秒打印 TX/RX 状态与统计（错误码每秒重复，防截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
-            wifiCfgPoll(now); // 每秒：判定关闭 WiFi（30s 无连接 / 60s 无访问 / 网页请求）
+            wifiCfgPoll(now); // 每秒：判定关闭 WiFi（有人在线不关 / 断开后 30 分钟无访问才关）
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
-                   wst, wifiCfgStr(), bleUartState(), otaVersion(),
+                   wst, wifiCfgStr(), wifiCfgDiag(), bleUartState(), otaVersion(),
                    urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag(),
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,

@@ -23,6 +23,8 @@ const char* wifiCfgStr();
 
 // 开机信息（版本/灯数/模式等），串口错过启动日志时 Web 调试区可看
 void wifiCfgSetBootInfo(const char* s);
+// v32.14：热点诊断串（在线设备数 + 距自动关闭剩余秒数，off<0 表示有人在线不会关）
+const char* wifiCfgDiag();
 const char* wifiCfgBootInfo();
 
 // DNS 劫持（captive portal）是否绑定成功：1=ok 0=fail/未启动

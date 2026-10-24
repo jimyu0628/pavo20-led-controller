@@ -34,14 +34,18 @@
 // 全局状态（需在 dnsTask / sendState 等使用处之前定义）
 static char s_bootInfo[512] = "n/a";     // 开机信息（Web 调试区显示）
 static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
-#define OFF_NO_HTTP_MS  300000  // 关闭网页/无操作 5 分钟后关（v25 从 60s 延长）
-#define OFF_NO_STA_MS   300000  // 上电后 5 分钟无手机连接则关（v25 从 30s 延长）
+// v32.14：自动关闭策略大改。以前的「5 分钟无访问就关」太短——插线、找热点、翻网页
+// 很容易超过 5 分钟，用户看到的就是「热点莫名其妙没了」。
+// 新规则：只要有设备连在热点上就永不自动关；全部断开后才开始计时。
+#define OFF_NO_HTTP_MS 1800000  // 保活期内、全部设备断开且 30 分钟无 HTTP 访问才关（原 5 分钟）
+#define OFF_NO_STA_MS   900000  // 上电后 15 分钟仍没有任何设备连过则关（原 5 分钟）
 
 static httpd_handle_t s_httpd = NULL;
 static volatile bool  s_wifiUp = false;
 static volatile bool  s_everConnected = false; // 是否曾有手机连上（连上后进入保持期）
 static volatile bool  s_offRequested = false;  // 网页请求关闭
 static volatile bool  s_stopping = false;
+static volatile int   s_staCount = 0;       // v32.14：当前连在热点上的设备数（每秒刷新）
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
 static char s_cfgStr[64];                  // 启动时缓存 "SSID/IP" 供心跳显示（SSID 最长 32 + IP 15 + 前缀后缀，64 防截断警告）
@@ -56,6 +60,13 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
         s_everConnected = true;
         printf("[WiFi] 手机已连接（进入保持期）\n");
     }
+}
+
+// v32.14：查询当前连在热点上的设备数（>0 = 手机在线，绝不自动关热点）
+static int staOnline() {
+    wifi_sta_list_t lst;
+    if (esp_wifi_ap_get_sta_list(&lst) != ESP_OK) return 0;
+    return (int)lst.num;
 }
 
 // ---------- HTTP：JSON 状态 ----------
@@ -338,6 +349,16 @@ static esp_err_t handler_captive(httpd_req_t* req) {
         return ESP_OK;
     }
     touchHttp();
+    // v32.14：把探测请求打印出来——自动弹窗不生效时，先看清手机的探测到底打到哪条路径
+    // （安卓 generate_204 / 苹果 hotspot-detect.html / 小米 connect.rom.miui.com / 华为 …）
+    {
+        char host[64] = "-";
+        if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
+            host[0] = '-';
+            host[1] = 0;
+        }
+        printf("[CP] %s%s -> 302\n", host, req->uri);
+    }
     // 绝对地址重定向：手机探测逻辑按完整 URL 判断是否 captive（相对地址部分机型不弹窗）。
     // v32.12：加 no-store，避免探测结果被缓存后第二次连热点不再弹窗。
     httpd_resp_set_status(req, "302 Found");
@@ -466,14 +487,45 @@ void wifiCfgPoll(uint32_t nowMs) {
         return;
     }
     uint64_t nowUs = esp_timer_get_time();
+
+    // v32.14：只要还有设备连在热点上，就绝不自动关（并持续刷新两个计时器）
+    int n = staOnline();
+    s_staCount = n;
+    if (n > 0) {
+        s_everConnected = true;
+        s_lastHttpUs = nowUs;
+        s_startUs    = nowUs;
+        return;
+    }
+
     uint64_t sinceHttp = (nowUs - s_lastHttpUs) / 1000;
     uint64_t sinceStart = (nowUs - s_startUs) / 1000;
 
     if (!s_everConnected) {
-        // 从未有手机连接：上电 30s 后关闭
+        // 从未有手机连接：上电 15 分钟后仍没人来，关掉省电
         if (sinceStart > OFF_NO_STA_MS) wifiStopAll();
     } else {
-        // 曾连接（保持期）：关闭网页/无操作 60s 后关闭
+        // 曾连接（保持期）：全部设备断开后 30 分钟无访问才关
         if (sinceHttp > OFF_NO_HTTP_MS) wifiStopAll();
     }
+}
+
+// v32.14：热点诊断串 "sta=N off=Ms"（off<0 表示有人在线、不会自动关；单为秒）
+const char* wifiCfgDiag() {
+    static char d[40];
+    if (!s_wifiUp) {
+        snprintf(d, sizeof(d), "sta=0 off=-");
+        return d;
+    }
+    int n = s_staCount;
+    int left = -1;
+    if (n == 0) {
+        uint64_t nowUs = esp_timer_get_time();
+        uint64_t limit = s_everConnected ? OFF_NO_HTTP_MS : OFF_NO_STA_MS;
+        uint64_t used  = s_everConnected ? (nowUs - s_lastHttpUs) / 1000
+                                         : (nowUs - s_startUs) / 1000;
+        left = (used >= limit) ? 0 : (int)((limit - used) / 1000);
+    }
+    snprintf(d, sizeof(d), "sta=%d off=%d", n, left);
+    return d;
 }
