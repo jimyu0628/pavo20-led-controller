@@ -59,6 +59,18 @@
 //   => 改走 Betaflight Configurator 官方支持的 TCP MSP 路线（见 msp_tcp.cpp，
 //      端口 5761，本板 WiFi AP 直接当 ELRS 那样的 TCP-MSP 网关），
 //      BLE 三套服务保留不动，nRF Connect 等通用工具仍可直连调试。
+//
+// v32.11：找到 Betaflight App 源码（src/js/protocols/devices.ts），蓝牙 profile 是
+//   写死的列表，逐条对下来终于知道它要什么：
+//     CC2541       = [服务 ffe0, 写 ffe1, 读/通知 ffe2]        ← 之前我们缺 FFE2
+//     HM-10        = [服务 ffe1, 写 ffe1, 读 ffe1]
+//     HM-11/NRF    = [服务 6e400001, 写 6e400003, 读 6e400002] ← 写/读方向跟我们相反
+//     SpeedyBee V2 = [服务 abf0, 写 abf1, 读 abf2] = ESP-IDF ble_spp_server
+//   它先按服务 UUID 认设备，认到之后拿两个特征 UUID 去 GATT 表里找；找不到就在
+//   getCharacteristics() 抛错 → 界面「打开串口失败」。这正好解释实测：连上了、
+//   MTU 也协商了，却一次特征都没碰。
+//   对策：FFE0 下补 FFE2；NUS 两个特征都改成读写通知全开；再补一套 ABF0/ABF1/ABF2。
+//   用户那份教程里的「AT+CHAR=FFE2」就是把模块特征改成 FFE2 去凑 CC2541 profile。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -89,6 +101,9 @@ static uint16_t s_connHandle = 0;   // 当前连接句柄（通知用）
 static uint16_t s_wrHandle = 0;     // 写特征句柄（NUS RX，手机->飞控）
 static uint16_t s_ntHandle = 0;     // 通知特征句柄（NUS TX，飞控->手机）
 static uint16_t s_ffHandle = 0;     // HM-10 FFE1（读写+通知，二合一）
+static uint16_t s_ff2Handle = 0;    // CC2541 FFE2（读/通知）
+static uint16_t s_abWrHandle = 0;   // ABF1 写
+static uint16_t s_abNtHandle = 0;   // ABF2 读/通知
 static uint16_t s_f0NtHandle = 0;   // FFF1 通知
 static uint16_t s_f0WrHandle = 0;   // FFF2 写
 static volatile uint16_t s_subHandle = 0; // 实际被订阅通知的句柄（0=未订阅）
@@ -150,9 +165,18 @@ static const ble_uuid128_t nus_nt_uuid =
 // 现在三套服务同时挂上、共用同一个 UART 桥，App 认哪套就用哪套。
 static const ble_uuid16_t ff_svc_uuid = BLE_UUID16_INIT(0xFFE0); // HM-10 服务
 static const ble_uuid16_t ff_chr_uuid = BLE_UUID16_INIT(0xFFE1); // HM-10 收发特征
+// v32.11：Betaflight App 源码里 CC2541 profile = [服务 ffe0, 写 ffe1, 读/通知 ffe2]。
+// 我们原来只有 FFE1，App 拿不到 FFE2 就在 getCharacteristics() 抛错，界面报
+// 「打开串口失败」——正好对上实测现象（连上、MTU 247、一次特征都没碰）。
+static const ble_uuid16_t ff2_nt_uuid = BLE_UUID16_INIT(0xFFE2); // CC2541 读/通知
 static const ble_uuid16_t f0_svc_uuid = BLE_UUID16_INIT(0xFFF0); // 部分国产模块
 static const ble_uuid16_t f0_nt_uuid  = BLE_UUID16_INIT(0xFFF1); // FFF1 通知
 static const ble_uuid16_t f0_wr_uuid  = BLE_UUID16_INIT(0xFFF2); // FFF2 写
+// Betaflight App 的「SpeedyBee V2」profile = [abf0, abf1 写, abf2 读]，
+// 也就是 ESP-IDF ble_spp_server 那套；SpeedyBee App 走的就是它（开源项目实测能连上并发出 MSP 请求）
+static const ble_uuid16_t abf_svc_uuid = BLE_UUID16_INIT(0xABF0);
+static const ble_uuid16_t abf_wr_uuid  = BLE_UUID16_INIT(0xABF1);
+static const ble_uuid16_t abf_nt_uuid  = BLE_UUID16_INIT(0xABF2);
 
 const char* bleUartState(void) {
     if (s_initErr) return "ble err";
@@ -278,15 +302,23 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
              .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP |
                       BLE_GATT_CHR_F_NOTIFY,
              .val_handle = &s_wrHandle},
-            // NUS TX（...03）：飞控 -> 手机通知
+            // NUS TX（...03）：飞控 -> 手机通知。
+            // v32.11：Betaflight App 的 NUS profile 把「写」放在 ...03、「读/通知」放在 ...02
+            // （src/js/protocols/devices.ts 里 NORDIC_UART = [svc, 6003, 6002]，跟我们原来的假设相反），
+            // 所以这个特征也补上 WRITE，两个方向都认。
             {.uuid = &nus_nt_uuid.u,
-             .access_cb = chr_nt_cb,
-             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+             .access_cb = chr_wr_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+                      BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
              .val_handle = &s_ntHandle},
             {0}
         }
     },
-    // ② HM-10 / AT-09 兼容（SpeedyBee App 认这套：服务 FFE0，特征 FFE1 读写通知三合一）
+    // ② HM-10 / AT-09 / CC2541（服务 FFE0，特征 FFE1 收发 + FFE2 读/通知）
+    // v32.11：Betaflight App 的 CC2541 profile 硬性要 [ffe0, ffe1 写, ffe2 读]，
+    // 缺 FFE2 会在 getCharacteristics() 直接抛错（界面提示「打开串口失败」）。
+    // 很多 HM-10 固件把收发都放在 FFE1 且没有 FFE2，App 有 fallback 兜底，
+    // 但那是「FFE1 带 notify 属性」时才走；两个都给上最稳。
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &ff_svc_uuid.u,
@@ -296,10 +328,32 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
              .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
                       BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
              .val_handle = &s_ffHandle},
+            {.uuid = &ff2_nt_uuid.u,
+             .access_cb = chr_nt_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_ff2Handle},
             {0}
         }
     },
-    // ③ FFF0（部分国产透传模块：FFF1 通知 / FFF2 写）
+    // ③ ABF0/ABF1/ABF2 = ESP-IDF ble_spp_server 那套，Betaflight App 里叫「SpeedyBee V2」，
+    // SpeedyBee App 走的也是它（开源项目实测能连上并发出 MSP 请求）
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &abf_svc_uuid.u,
+        .characteristics = (struct ble_gatt_chr_def[]){
+            {.uuid = &abf_wr_uuid.u,
+             .access_cb = chr_wr_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE |
+                      BLE_GATT_CHR_F_WRITE_NO_RSP | BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_abWrHandle},
+            {.uuid = &abf_nt_uuid.u,
+             .access_cb = chr_nt_cb,
+             .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+             .val_handle = &s_abNtHandle},
+            {0}
+        }
+    },
+    // ④ FFF0（部分国产透传模块：FFF1 通知 / FFF2 写）
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &f0_svc_uuid.u,
@@ -354,12 +408,11 @@ static void adv_start(void) {
     struct ble_gap_adv_params adv = {0};
     struct ble_hs_adv_fields f = {0};
     const char* devName = "PavoLED";
-    // v32.9：把 FFE0/FFF0 放进主广播包。有些 App（SpeedyBee 疑似属于这类）
-    // 只解析 adv data、不合并扫描响应，扫描时按服务 UUID 过滤就会漏掉我们。
-    // 主包：flags(3) + FFE0(4) + FFF0(4) + 名字(9) = 20 字节，安全。
-    // NUS 的 128-bit UUID(18 字节) 挪到扫描响应里。
+    // v32.11：主包放 FFE0 + ABF0（Betaflight App 的 CC2541 / SpeedyBee V2 两个 profile
+    // 的服务 UUID，扫到任意一个都能匹配；acceptAllDevices 的 App 不看这个也不影响）。
+    // 主包：flags(3) + FFE0(4) + ABF0(4) + 名字(9) = 20 字节；NUS 128-bit 放扫描响应。
     static const ble_uuid16_t adv_uuids[] = { BLE_UUID16_INIT(0xFFE0),
-                                              BLE_UUID16_INIT(0xFFF0) };
+                                              BLE_UUID16_INIT(0xABF0) };
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
     f.uuids16 = adv_uuids;
     f.num_uuids16 = 2;
@@ -400,8 +453,10 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             // （Read By Group Type / Read By Type / Read / Write / CCCD 写）
             // 都会打出来。App 认不出设备时，这行日志能直接看出它到底停在哪一步
             esp_log_level_set("NimBLE", ESP_LOG_DEBUG);
-            printf("[BLE] 已连接（NUS wr=%u nt=%u | FFE1=%u | FFF1=%u FFF2=%u）\n",
-                   (unsigned)s_wrHandle, (unsigned)s_ntHandle, (unsigned)s_ffHandle,
+            printf("[BLE] 已连接（NUS wr=%u nt=%u | FF: %u %u | ABF: %u %u | FFF: %u %u）\n",
+                   (unsigned)s_wrHandle, (unsigned)s_ntHandle,
+                   (unsigned)s_ffHandle, (unsigned)s_ff2Handle,
+                   (unsigned)s_abWrHandle, (unsigned)s_abNtHandle,
                    (unsigned)s_f0NtHandle, (unsigned)s_f0WrHandle);
             xTaskCreate(subWatchTask, "bleSubW", 2048, NULL, 3, NULL);
             // 请求更快的连接参数：WiFi AP 同时在跑（单射频分时），
