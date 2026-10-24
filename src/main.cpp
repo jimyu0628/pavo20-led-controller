@@ -26,6 +26,7 @@
 #include "ble_uart.h"
 #include "msp_tcp.h"      // v32.10：MSP over TCP（5761），走 WiFi 给 BF Configurator 用
 #include "ota.h"
+#include "device_name.h"  // v32.19：设备名（PavoLED + MAC 后缀），WiFi/BLE 共用
 #include "esp_ota_ops.h"
 #include "esp_system.h"   // esp_reset_reason / esp_restart
 #include "esp_wifi.h"     // v32.13：AP 发射功率限制（弱供电下保热点）
@@ -302,16 +303,18 @@ extern "C" void app_main(void) {
     refreshStrip();
     // 合并成单行输出：USB 串口在连接后才就绪，开机早期的多条 printf 容易丢失，
     // 单行 + \n 一次性输出，版本/灯数/模式全部可见
-    logMsg("=== 幻彩灯带控制板 %s | 灯数=%d 比例=1:%d 模式=%d | 复位原因=%d ===\n",
-           otaVersion(), s_calibCount, currentRatio(), s_mode, (int)esp_reset_reason());
+    // v32.19：设备名带 MAC 后缀（如 PavoLED-A3），WiFi 热点和 BLE 广播都用它，
+    // 飞场里多台同款板子能分清。开机就打印出来，方便确认这台到底是哪个。
+    logMsg("=== 幻彩灯带控制板 %s | 设备名 %s | 灯数=%d 比例=1:%d 模式=%d | 复位原因=%d ===\n",
+           otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode, (int)esp_reset_reason());
     logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
            __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
            ledOutOk() ? "OK" : "FAIL", (unsigned)ledOutErr());
     // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
     char bi[512];
     snprintf(bi, sizeof(bi),
-             "版本 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s | 复位原因 %d",
-             otaVersion(), s_calibCount, currentRatio(), s_mode,
+             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s | 复位原因 %d",
+             otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode,
              __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
              ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason());
     wifiCfgSetBootInfo(bi);

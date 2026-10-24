@@ -213,7 +213,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   ③ 手机网页版调参：按上面橙色框里的办法装成 App，或干脆用蓝牙。
  </div>
 </div>
-<div class="sub">WiFi 密码 12345678 · 有人连着就不会自动关闭</div>
+<div class="sub">当前设备 <b>@@DEVNAME@@</b> · WiFi 密码 12345678 · 有人连着就不会自动关闭</div>
 <div style="font-size:12px;color:#666;margin:6px 0 10px;line-height:1.7">
  手机若弹「此 WLAN 无法访问互联网 / 是否保持连接」，请选 <b>保持连接</b> 或 <b>使用</b>——本热点不联外网，只用来打开这个页面。
 </div>
@@ -304,11 +304,23 @@ fetch("/api/state").then(function(r){return r.json();}).then(function(j){st=j;re
 </script>
 </body></html>)rawliteral";
 
+// v32.19：页面里用 @@DEVNAME@@ 占位，发出去之前替换成运行时设备名（带 MAC 后缀）。
+// 不用 snprintf 拼整个页面——HTML 有 10KB 左右，拼进 buffer 太费 RAM（还要留给 BLE），
+// 直接分块发送：占位符之前的一段 → 设备名 → 之后的一段。
+#define DEV_NAME_PH "@@DEVNAME@@"
 static esp_err_t handler_root(httpd_req_t* req) {
     touchHttp();
     httpd_resp_set_hdr(req, "Content-Type", "text/html; charset=utf-8");
-    httpd_resp_sendstr(req, HTML_PAGE);
-    return ESP_OK;
+    const char* ph = strstr(HTML_PAGE, DEV_NAME_PH);
+    if (!ph) { // 占位符被改掉了也不至于白屏，原样发
+        httpd_resp_sendstr(req, HTML_PAGE);
+        return ESP_OK;
+    }
+    esp_err_t e1 = httpd_resp_send_chunk(req, HTML_PAGE, (ssize_t)(ph - HTML_PAGE));
+    esp_err_t e2 = httpd_resp_send_chunk(req, DEV_NAME, HTTPD_RESP_USE_STRLEN);
+    esp_err_t e3 = httpd_resp_send_chunk(req, ph + strlen(DEV_NAME_PH), HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, NULL, 0); // 结束 chunked 响应
+    return (e1 == ESP_OK && e2 == ESP_OK && e3 == ESP_OK) ? ESP_OK : ESP_FAIL;
 }
 
 // ========== Captive Portal：DNS 劫持（手机探测域名 → 192.168.4.1） ==========
@@ -469,6 +481,7 @@ void wifiCfgInit() {
 
     wifi_config_t wc = {};
     strncpy((char*)wc.ap.ssid, WIFI_SSID, sizeof(wc.ap.ssid));
+    wc.ap.ssid_len = (uint8_t)strlen(WIFI_SSID); // v32.19：名字变成运行时字符串，长度显式给出更稳妥
     strncpy((char*)wc.ap.password, WIFI_PASS, sizeof(wc.ap.password));
     wc.ap.channel = WIFI_CHANNEL;
     wc.ap.max_connection = WIFI_MAX_CONN;

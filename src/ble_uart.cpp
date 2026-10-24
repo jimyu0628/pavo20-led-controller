@@ -408,18 +408,19 @@ static void subWatchTask(void* arg) {
 static void adv_start(void) {
     struct ble_gap_adv_params adv = {0};
     struct ble_hs_adv_fields f = {0};
-    const char* devName = DEV_NAME; // v32.18：与 WiFi SSID 同源，改名字只改 device_name.h
+    const char* dn = DEV_NAME; // v32.19：运行时名字，带 MAC 后缀，与 WiFi SSID 同一个来源
     // v32.11：主包放 FFE0 + ABF0（Betaflight App 的 CC2541 / SpeedyBee V2 两个 profile
     // 的服务 UUID，扫到任意一个都能匹配；acceptAllDevices 的 App 不看这个也不影响）。
-    // 主包：flags(3) + FFE0(4) + ABF0(4) + 名字(9) = 20 字节；NUS 128-bit 放扫描响应。
+    // 主包：flags(3) + FFE0(4) + ABF0(4) + 名字(12，含 1 长度 + 1 类型 + "PavoLED-A3" 10 字符)
+    //       = 23 字节；NUS 128-bit 放扫描响应。上限 31 字节，还剩 8 字节余量。
     static const ble_uuid16_t adv_uuids[] = { BLE_UUID16_INIT(0xFFE0),
                                               BLE_UUID16_INIT(0xABF0) };
     f.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP; // 可发现+仅LE：手机列表才显示
     f.uuids16 = adv_uuids;
     f.num_uuids16 = 2;
     f.uuids16_is_complete = 1;
-    f.name = (uint8_t*)devName;
-    f.name_len = (uint8_t)strlen(devName);
+    f.name = (uint8_t*)dn;
+    f.name_len = (uint8_t)strlen(dn);
     f.name_is_complete = 1;
     int rc = ble_gap_adv_set_fields(&f);
     if (rc != 0) { printf("[BLE] adv set fields err %d\n", rc); s_advOk = 0; return; }
