@@ -24,6 +24,7 @@
 #include "button.h"
 #include "wifi_cfg.h"
 #include "ble_uart.h"
+#include "msp_tcp.h"      // v32.10：MSP over TCP（5761），走 WiFi 给 BF Configurator 用
 #include "ota.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"   // esp_reset_reason / esp_restart
@@ -46,7 +47,7 @@ static void delayMs(uint32_t ms) {
 static void logMsg(const char* fmt, ...) {
     // v32.5：160 字节太小——心跳整行 180+ 字符会被 vsnprintf 截断，
     // 导致 [MSP]/[RX] 后半段永远打不出来（排查时看不到关键字段）
-    char buf[320];
+    char buf[400];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
@@ -272,6 +273,7 @@ extern "C" void app_main(void) {
     fcInputInit();
     wifiCfgInit(); // AP 热点 RGBled + Web 设置（30s 无连接自动关闭）
     bleUartInit(); // BLE NUS 透传（SpeedyBee App 蓝牙调参）
+    mspTcpInit();  // v32.10：MSP over TCP 5761，PC 端 BF Configurator 走 WiFi 直连
     // 开机自检：白灯闪 1s（肉眼确认灯带与信号链路；不经过亮度缩放，应是纯白）
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB(255, 255, 255);
     refreshStrip();
@@ -307,10 +309,10 @@ extern "C" void app_main(void) {
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), bleUartState(), otaVersion(),
-                   urx - lastUrx, utx - lastUtx, bleUartDiag(),
+                   urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag(),
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
                    (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,

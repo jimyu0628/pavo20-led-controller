@@ -50,6 +50,15 @@
 //   2) 连接期间把 NimBLE 日志升到 DEBUG，ATT 层每个请求（Read By Group Type /
 //      Read By Type / Read / Write / CCCD）都会打出来；断开自动降回 INFO。
 //      再配一条「1.5s 无订阅」提示，下次日志能直接看出 App 停在哪一步。
+//
+// v32.10：实测 Betaflight App 网页版能扫到 PavoLED、能连、MTU=247，但只写了
+//   一次 Service Changed(0x2A05) 的 CCCD(句柄 8) 就报「打开串口失败」，
+//   全程没碰 NUS/FFE0 任何一个特征。结合官方文档「兼容 SpeedyBee App 支持的
+//   飞控」+ 两个开源项目的失败记录，判断这类 App 的 BLE 通道只认厂家模块，
+//   第三方桥很难过白名单，继续在 BLE 上耗性价比太低。
+//   => 改走 Betaflight Configurator 官方支持的 TCP MSP 路线（见 msp_tcp.cpp，
+//      端口 5761，本板 WiFi AP 直接当 ELRS 那样的 TCP-MSP 网关），
+//      BLE 三套服务保留不动，nRF Connect 等通用工具仍可直连调试。
 // ============================================================
 #include "ble_uart.h"
 #include "driver/uart.h"
@@ -63,6 +72,7 @@
 #include "services/gatt/ble_svc_gatt.h"
 #include "os/os_mbuf.h"
 #include "esp_log.h"
+#include "msp_tcp.h"   // v32.10：同一条 UART1 同时挂 BLE 与 TCP 两个出口
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
@@ -457,6 +467,7 @@ static void uart_rx_task(void* arg) {
         int n = uart_read_bytes(NUS_UART, buf, sizeof(buf), pdMS_TO_TICKS(20));
         if (n > 0) {
             s_uartRx += (uint32_t)n; // 无论是否连接都计数：用于判断飞控有没有回
+            mspTcpSend(buf, n);      // v32.10：有 TCP 客户端时同时转发给 PC
             if (s_connected && s_subHandle) notifyBytes(buf, n);
             else pendAppend(buf, n);     // 还没订阅：先攒着，订阅后补发
         }
