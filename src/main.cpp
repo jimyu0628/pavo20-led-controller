@@ -85,8 +85,12 @@ static void nvsPutU16(const char* k, uint16_t v) {
 // ---------- 运行状态 ----------
 static int s_mode = DEFAULT_MODE; // 0=Betaflight, 1~9=灯效；开机固定本地灯效
 static int s_colorIdx = 0;    // 0~7（断电记忆）
-static int s_speedIdx = 1;    // 0快 1中 2慢（断电记忆）
-static int s_brightIdx = 0;   // 0~3（断电记忆）
+// v32.21：速度、亮度从「档位索引」改成「无级百分比」——网页要能拖动到任意值。
+// 按键手势仍按固定档循环（下表），只是它改的是同一个百分比变量，两套入口不打架。
+static int s_speedPct  = 55;  // 1~100，越大越快（断电记忆）
+static int s_brightPct = 50;  // 0~100，0=关灯（断电记忆）
+static const uint8_t SPEED_STEPS[SPEED_COUNT]   = {85, 55, 15};       // 快/中/慢（三击循环）
+static const uint8_t BRIGHT_STEPS[BRIGHT_COUNT] = {100, 75, 50, 25};  // 长按循环
 static int s_calibCount = STRIP_DEFAULT_LEDS; // 标定灯数（实际灯带长度，断电记忆）
 static bool s_calibrating = false;
 static int s_calCount = STRIP_DEFAULT_LEDS;   // 标定过程中的计数
@@ -99,30 +103,49 @@ static uint32_t s_lastFcMs = 0;   // 最后一次有效飞控帧时间
 // 效果帧节奏
 static uint32_t s_lastFxMs = 0;
 static int s_fxPhase = 0;
-static const uint32_t FX_INTERVAL_MS[SPEED_COUNT] = {20, 45, 90};
+// v32.21：速度 1~100 线性映射到帧间隔 200ms~20ms（原来只有 20/45/90 三档，
+// 网页拖到 47 这种中间值就没处安放）。100=20ms（50 帧/秒，丝滑），1=200ms（肉眼可数的慢）。
+static uint32_t fxIntervalMs() { return 20u + (uint32_t)(100 - s_speedPct) * 180u / 99u; }
+// 亮度百分比 → 亮度系数（0~255）。0% 直接给 0，等于关灯。
+static uint8_t brightScale() { return (uint8_t)(s_brightPct * 255 / 100); }
 // ---------- 持久化 ----------
 static void loadPrefs() {
     // 开机恢复上次保存的设置（v30 起模式也记忆）：
     // 颜色/速度/亮度/模式/标定灯数均断电记忆；
     // 若上次是飞控模式(0)且未接飞控，上电灭灯属正常，单击按键切到本地灯效即可
+    uint8_t tmp = 0;
+    uint8_t oi  = 0;
     s_mode       = nvsGetU8("mode", DEFAULT_MODE);
     s_colorIdx   = nvsGetU8("color", 0);
-    s_speedIdx   = nvsGetU8("speed", 1);
-    // 默认亮度 50%（档位 2 = 128/255）；键名 bright1 确保此版首次上电即 50%
-    s_brightIdx  = nvsGetU8("bright1", 2);
+    // v32.21：新键 spct/bpct 优先；老固件只留下 speed/bright1 档位索引，做一次兼容换算，
+    // 免得刷完新固件亮度和速度跳回默认值。
+    if (nvs_get_u8(s_nvs, "spct", &tmp) == ESP_OK) {
+        s_speedPct = tmp;
+    } else {
+        oi = nvsGetU8("speed", 1);
+        s_speedPct = SPEED_STEPS[(oi < SPEED_COUNT) ? oi : 1];
+    }
+    if (nvs_get_u8(s_nvs, "bpct", &tmp) == ESP_OK) {
+        s_brightPct = tmp;
+    } else {
+        oi = nvsGetU8("bright1", 2);
+        s_brightPct = BRIGHT_STEPS[(oi < BRIGHT_COUNT) ? oi : 2];
+    }
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
-    if (s_speedIdx < 0 || s_speedIdx >= SPEED_COUNT) s_speedIdx = 1;
-    if (s_brightIdx < 0 || s_brightIdx >= BRIGHT_COUNT) s_brightIdx = 2;
+    if (s_speedPct  < 1)   s_speedPct  = 1;
+    if (s_speedPct  > 100) s_speedPct  = 100;
+    if (s_brightPct < 0)   s_brightPct = 0;
+    if (s_brightPct > 100) s_brightPct = 100;
     if (s_calibCount < 1 || s_calibCount > CALIB_MAX) s_calibCount = STRIP_DEFAULT_LEDS;
     s_stripLen = (s_calibCount > STRIP_MAX_LEDS) ? STRIP_MAX_LEDS : s_calibCount;
 }
 static void savePrefs() {
     nvsPutU8("mode", (uint8_t)s_mode);
     nvsPutU8("color", (uint8_t)s_colorIdx);
-    nvsPutU8("speed", (uint8_t)s_speedIdx);
-    nvsPutU8("bright1", (uint8_t)s_brightIdx);
+    nvsPutU8("spct", (uint8_t)s_speedPct);
+    nvsPutU8("bpct", (uint8_t)s_brightPct);
     nvsPutU16("calib", (uint16_t)s_calibCount);
 }
 // ---------- 显示 ----------
@@ -183,6 +206,11 @@ static void exitCalibration() {
     refreshStrip();
 }
 // ---------- 按键事件处理 ----------
+// 在档位表里找「比当前值小的最大档」，没有（已是最低档）就绕回第一档 —— 循环切换
+static int nextStep(const uint8_t* tab, int n, int cur) {
+    for (int i = 0; i < n; i++) if (tab[i] < cur) return tab[i];
+    return tab[0];
+}
 static void handleButton(ButtonEvent ev) {
     if (s_calibrating) {
         if (ev == BTN_CAL) exitCalibration();
@@ -201,15 +229,14 @@ static void handleButton(ButtonEvent ev) {
             logMsg("[按键] 颜色=%d\n", s_colorIdx);
             break;
         case BTN_TRIPLE:
-            s_speedIdx = (s_speedIdx + 1) % SPEED_COUNT;
+            s_speedPct = nextStep(SPEED_STEPS, SPEED_COUNT, s_speedPct);
             savePrefs();
-            logMsg("[按键] 速度=%d\n", s_speedIdx);
+            logMsg("[按键] 速度=%d\n", s_speedPct);
             break;
         case BTN_BRIGHT:
-            s_brightIdx = (s_brightIdx + 1) % BRIGHT_COUNT;
+            s_brightPct = nextStep(BRIGHT_STEPS, BRIGHT_COUNT, s_brightPct);
             savePrefs();
-            logMsg("[按键] 亮度=%d%%\n",
-                   (int)(BRIGHT_SCALE[s_brightIdx] * 100 / 255));
+            logMsg("[按键] 亮度=%d%%\n", s_brightPct);
             break;
         case BTN_CAL:
             enterCalibration();
@@ -222,15 +249,15 @@ static void handleButton(ButtonEvent ev) {
 // 状态读取
 int webGetMode()   { return s_mode; }
 int webGetColor()  { return s_colorIdx; }
-int webGetSpeed()  { return s_speedIdx; }
-int webGetBright() { return s_brightIdx; }
+int webGetSpeed()  { return s_speedPct; }   // v32.21：1~100（原来是 0/1/2 档位）
+int webGetBright() { return s_brightPct; }  // v32.21：0~100（原来是 0~3 档位）
 int webGetCalib()  { return s_calibCount; }
 bool webIsCalibrating() { return s_calibrating; }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
 void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
-void webSetSpeed(int v)  { if (v >= 0 && v < SPEED_COUNT) { s_speedIdx = v; savePrefs(); } }
-void webSetBright(int v) { if (v >= 0 && v < BRIGHT_COUNT) { s_brightIdx = v; savePrefs(); } }
+void webSetSpeed(int v)  { if (v >= 1 && v <= 100) { s_speedPct = v; savePrefs(); } }
+void webSetBright(int v) { if (v >= 0 && v <= 100) { s_brightPct = v; savePrefs(); } }
 
 // 网页设置 LED 数量（等价于按键标定：只记总数，红蓝按比例自动分配）
 void webSetCount(int v) {
@@ -252,7 +279,7 @@ void webApplyNow() {
         }
     } else {
         renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
-        applyBrightness(s_strip, s_stripLen, BRIGHT_SCALE[s_brightIdx]);
+        applyBrightness(s_strip, s_stripLen, brightScale());
         refreshStrip();
     }
 }
@@ -307,15 +334,15 @@ extern "C" void app_main(void) {
     // 飞场里多台同款板子能分清。开机就打印出来，方便确认这台到底是哪个。
     logMsg("=== 幻彩灯带控制板 %s | 设备名 %s | 灯数=%d 比例=1:%d 模式=%d | 复位原因=%d ===\n",
            otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode, (int)esp_reset_reason());
-    logMsg("build: %s %s | 颜色=%d 速度=%d 亮度档=%d | LED init=%s err=0x%x\n",
-           __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
+    logMsg("build: %s %s | 颜色=%d 速度=%d 亮度=%d%% | LED init=%s err=0x%x\n",
+           __DATE__, __TIME__, s_colorIdx, s_speedPct, s_brightPct,
            ledOutOk() ? "OK" : "FAIL", (unsigned)ledOutErr());
     // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
     char bi[512];
     snprintf(bi, sizeof(bi),
-             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d | LED %s | 复位原因 %d",
+             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d%% | LED %s | 复位原因 %d",
              otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode,
-             __DATE__, __TIME__, s_colorIdx, s_speedIdx, s_brightIdx,
+             __DATE__, __TIME__, s_colorIdx, s_speedPct, s_brightPct,
              ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason());
     wifiCfgSetBootInfo(bi);
     uint32_t lastBtnPoll = 0;
@@ -369,14 +396,14 @@ extern "C" void app_main(void) {
                 refreshStrip();
             } // 灯效模式：不灭灯，灯效渲染自然接管
         }
-        // 4) 灯效模式渲染（非标定 && 无飞控接管 && 模式 1~9，按速度定帧间隔）
+        // 4) 灯效模式渲染（非标定 && 无飞控接管 && 模式 1~9，按速度决定帧间隔）
         if (!s_calibrating && !s_fcActive && s_mode != 0 &&
-            (now - s_lastFxMs) >= FX_INTERVAL_MS[s_speedIdx]) {
+            (now - s_lastFxMs) >= fxIntervalMs()) {
             s_lastFxMs = now;
             s_fxPhase++;
             if (s_fxPhase >= 1000000) s_fxPhase = 0; // 防 int 溢出
             renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
-            applyBrightness(s_strip, s_stripLen, BRIGHT_SCALE[s_brightIdx]);
+            applyBrightness(s_strip, s_stripLen, brightScale());
             refreshStrip();
         }
         delayMs(1);

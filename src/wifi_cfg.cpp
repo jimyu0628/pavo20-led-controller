@@ -16,6 +16,9 @@
 #include "ota.h"
 #include "ble_uart.h"
 #include "device_name.h"   // DEV_NAME：热点 SSID 与 BLE 名同源
+#include "web_page.h"     // v32.21：内嵌网页（A+ 三功能区界面）
+#include "config.h"        // STRIP_MAX_LEDS（网页里「灯带长度」的上限）
+#include "fc_input.h"      // 网页调试区显示飞控帧计数
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -34,6 +37,7 @@
 
 // 全局状态（需在 dnsTask / sendState 等使用处之前定义）
 static char s_bootInfo[512] = "n/a";     // 开机信息（Web 调试区显示）
+static char s_ip[16] = "192.168.4.1";    // v32.21：网页「连接」页要显示，init 里取一次真实值
 static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
 // v32.14：自动关闭策略大改。以前的「5 分钟无访问就关」太短——插线、找热点、翻网页
 // 很容易超过 5 分钟，用户看到的就是「热点莫名其妙没了」。
@@ -48,18 +52,15 @@ static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
 static httpd_handle_t s_httpd = NULL;
 static volatile bool  s_wifiUp = false;
 static volatile bool  s_everConnected = false; // 是否曾有手机连上（连上后进入保持期）
-static volatile bool  s_offRequested = false;  // 网页请求关闭
-static volatile bool  s_stopping = false;
 static volatile int   s_staCount = 0;       // v32.14：当前连在热点上的设备数（每秒刷新）
 static volatile uint32_t s_dnsQ = 0;        // v32.15：累计收到的 DNS 查询数（排查劫持是否真被用到）
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
 static volatile uint64_t s_lastActUs  = 0; // v32.20：最后一次「有人在用无线」的时刻（µs）
-static volatile bool s_pwrTaskRun = false; // v32.20：关闭任务是否已在跑（防重复创建）
 static char s_cfgStr[64];                  // 启动时缓存 "SSID/IP" 供心跳显示（SSID 最长 32 + IP 15 + 前缀后缀，64 防截断警告）
 
 // ---------- 内部 ----------
-static void wifiStopAll();
+static esp_err_t wifiStopAll(); // v32.21：返回错误码，关闭失败要能重试
 
 // ---------- WiFi 事件：手机连上 ----------
 static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
@@ -113,39 +114,72 @@ static void touchHttp() {
     s_lastActUs  = t; // v32.20：网页有请求就算「在用」，闲置计时归零
 }
 
+// v32.21：新界面（灯光 / 连接 / 设备 三页）一次要把三页的数值都拿到，
+// 所以 /api/state 一条就全给齐，页面每秒轮询这一次就够，不再另开接口。
+//   mode/color/spd/bright/count —— 当前生效的设置（spd 1~100，bright 0~100）
+//   maxc —— 灯带缓冲上限（页面据此画「灯带长度」轨道，改 config.h 页面自动跟）
+//   ssid/ip/sta/idle —— 热点信息，idle = 距自动关闭的秒数（-1 表示有人在用、不会关）
+//   v/bld/up/rs —— 版本、构建时间、已运行秒数、复位原因
+//   ble/dns/fc/msp/bdiag/boot —— 调试区与「连接」页用
 static void sendState(httpd_req_t* req) {
-    // v32.5：boot 最多 512 字节，原 640 缓冲放全套字段会截断 JSON（网页白屏），放宽到 1024
-    char buf[1024];
+    // boot 字符串本身约 170 字节，加上其余字段整条 500 上下，1400 留足余量
+    char buf[1400];
     snprintf(buf, sizeof(buf),
-             "{\"mode\":%d,\"color\":%d,\"speed\":%d,\"bright\":%d,\"calib\":%d,\"cal\":%d,\"v\":\"%s\",\"ws\":\"%s\",\"ble\":\"%s\",\"bdiag\":\"%s\",\"dns\":%d,\"boot\":\"%s\"}",
+             "{\"mode\":%d,\"color\":%d,\"spd\":%d,\"bright\":%d,\"count\":%d,\"maxc\":%d,"
+             "\"cal\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"sta\":%d,\"idle\":%d,"
+             "\"v\":\"%s\",\"bld\":\"%s %s\",\"up\":%lu,\"rs\":%d,"
+             "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\"}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
-             webGetCalib(), webIsCalibrating() ? 1 : 0, otaVersion(), wifiCfgStr(),
-             bleUartState(), bleUartDiag(),
-             wifiCfgDnsOk(), wifiCfgBootInfo());
+             webGetCalib(), STRIP_MAX_LEDS,
+             webIsCalibrating() ? 1 : 0,
+             DEV_NAME, s_ip, s_staCount, wifiCfgIdleLeft(),
+             otaVersion(), __DATE__, __TIME__,
+             (unsigned long)(esp_timer_get_time() / 1000000), (int)esp_reset_reason(),
+             bleUartState(), wifiCfgDnsOk(), (unsigned long)g_rxFrames,
+             mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);
 }
 
 // ---------- HTTP：设置 ----------
-// /api/set?mode=3&color=1&speed=2&bright=0 （缺省参数不修改）
+// v32.21：网页「应用」按钮一次性把五项参数全发过来：
+//   POST /api/set   body: mode=5&color=2&spd=55&bright=80&count=55
+// 用 form-urlencoded 而不是 JSON —— httpd_query_key_value 直接就能解析这种串，
+// 省掉一个 JSON 解析器（这板子 RAM 还要留给 BLE）。
+// 老的 GET /api/set?mode=3 也还认，方便用 curl 单个调。
 static esp_err_t handler_set(httpd_req_t* req) {
     touchHttp();
-    char q[96];
-    char v[8];
-    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
-        if (httpd_query_key_value(q, "mode", v, sizeof(v)) == ESP_OK)
-            webSetMode(atoi(v));
-        if (httpd_query_key_value(q, "color", v, sizeof(v)) == ESP_OK)
-            webSetColor(atoi(v));
-        if (httpd_query_key_value(q, "speed", v, sizeof(v)) == ESP_OK)
-            webSetSpeed(atoi(v));
-        if (httpd_query_key_value(q, "bright", v, sizeof(v)) == ESP_OK)
-            webSetBright(atoi(v));
-        if (httpd_query_key_value(q, "count", v, sizeof(v)) == ESP_OK)
-            webSetCount(atoi(v));
+    char q[192];
+    if (req->method == HTTP_POST) {
+        int len = (int)req->content_len;
+        int cap = (int)sizeof(q) - 1;
+        int got = 0;
+        if (len <= 0) { q[0] = 0; len = 0; }
+        while (got < len) {
+            int off  = (got < cap) ? got : 0;  // 超长部分丢掉，只留前 cap 字节
+            int want = (got < cap) ? (cap - got) : cap;
+            if (want > len - got) want = len - got;
+            int n = httpd_req_recv(req, q + off, want);
+            if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;   // 网络慢，接着收
+            if (n <= 0) break;                            // 出错/断线
+            got += n;
+        }
+        q[(got < cap) ? got : cap] = 0;
+    } else {
+        if (httpd_req_get_url_query_str(req, q, sizeof(q)) != ESP_OK) q[0] = 0;
+    }
+
+    if (q[0]) {
+        char v[8];
+        if (httpd_query_key_value(q, "mode",   v, sizeof(v)) == ESP_OK) webSetMode(atoi(v));
+        if (httpd_query_key_value(q, "color",  v, sizeof(v)) == ESP_OK) webSetColor(atoi(v));
+        if (httpd_query_key_value(q, "spd",    v, sizeof(v)) == ESP_OK) webSetSpeed(atoi(v));
+        if (httpd_query_key_value(q, "bright", v, sizeof(v)) == ESP_OK) webSetBright(atoi(v));
+        if (httpd_query_key_value(q, "count",  v, sizeof(v)) == ESP_OK) webSetCount(atoi(v));
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
-    sendState(req);
+    sendState(req); // 回一整套最新状态，网页拿到就直接同步
     return ESP_OK;
 }
 
@@ -153,15 +187,6 @@ static esp_err_t handler_set(httpd_req_t* req) {
 static esp_err_t handler_state(httpd_req_t* req) {
     touchHttp();
     sendState(req);
-    return ESP_OK;
-}
-
-// ---------- HTTP：关闭 WiFi ----------
-static esp_err_t handler_off(httpd_req_t* req) {
-    touchHttp();
-    s_offRequested = true; // 由 wifiCfgPoll 执行真正关闭（handler 内不可 stop httpd）
-    httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
-    httpd_resp_sendstr(req, "{\"ok\":1}");
     return ESP_OK;
 }
 
@@ -182,172 +207,15 @@ static esp_err_t handler_reboot(httpd_req_t* req) {
     return ESP_OK;
 }
 
-// ---------- HTTP：主页（内嵌页面，手机适配） ----------
-static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>幻彩灯带控制板</title>
-<style>
- body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#111;color:#eee;margin:0;padding:16px;max-width:560px;margin:0 auto}
- h1{font-size:20px;margin:8px 0 4px} .sub{color:#888;font-size:13px;margin-bottom:14px}
- .card{background:#1d1d1d;border-radius:10px;padding:12px 14px;margin:10px 0}
- .card h3{margin:0 0 10px;font-size:14px;color:#ffb454}
- .btns{display:flex;flex-wrap:wrap;gap:8px}
- button{flex:1 1 auto;min-width:72px;min-height:44px;border:1px solid #333;background:#222;color:#eee;border-radius:8px;font-size:14px}
- button.on{background:#e08e0b;color:#000;border-color:#e08e0b;font-weight:bold}
- .sw{width:44px;height:44px;border-radius:8px;border:2px solid #333}
- .sw.on{border:2px solid #fff;transform:scale(1.08)}
- #st{font-size:13px;color:#9be;background:#14202e;padding:8px 12px;border-radius:8px;margin-bottom:6px}
- #toast{position:fixed;left:0;right:0;bottom:24px;text-align:center;color:#000;background:#ffb454;padding:10px;font-weight:bold;display:none}
- .danger{background:#7a1f1f;border-color:#a33}
-</style>
-</head>
-<body>
-<h1>幻彩灯带控制板 <span id="ver" style="font-size:13px;color:#888">v32</span></h1>
-<div class="card" style="border:2px solid #2d7ff9;background:#eef4ff">
- <h3 style="margin-top:0;color:#15427f">飞控调参</h3>
- <a href="https://app.betaflight.com" target="_blank" rel="noopener"
-    style="display:block;text-align:center;padding:16px 12px;background:#2d7ff9;color:#fff;border-radius:12px;font-size:18px;font-weight:700;text-decoration:none;box-shadow:0 4px 10px rgba(45,127,249,.35)">
-  打开 Betaflight 调参 &rarr;
- </a>
- <div style="font-size:12px;color:#8a3a00;background:#fff4e5;border-left:3px solid #e08c1a;padding:8px 10px;margin-top:10px;line-height:1.75">
-  <b>连着本热点时，上面这个按钮打不开。</b>本热点不联外网，DNS 会把所有域名都指回 192.168.4.1，
-  点下去只会拿到一个错误页。只有手机<b>事先</b>把 Betaflight 装成 App 才能离线打开——
-  <br>装法：<b>先断开本热点</b>，用移动数据打开 <code>app.betaflight.com</code>，浏览器菜单里「添加到主屏幕」，之后连着本热点也能开。
- </div>
- <div style="font-size:12px;color:#555;margin-top:10px;line-height:1.75">
-  ① <b>蓝牙（推荐，不依赖联网，飞场上最稳）</b>：系统蓝牙里连与本热点<b>同名</b>的设备，再在 Betaflight App 里选它；<br>
-  ② <b>电脑桌面版</b>：端口选 <code>Manual Selection</code>，填 <code>tcp://192.168.4.1</code>（走本热点 TCP 5761）；<br>
-  ③ 手机网页版调参：按上面橙色框里的办法装成 App，或干脆用蓝牙。
- </div>
-</div>
-<div class="sub">当前设备 <b>@@DEVNAME@@</b> · WiFi 密码 12345678 · 有人连着就不会自动关闭</div>
-<div style="font-size:12px;color:#666;margin:6px 0 10px;line-height:1.7">
- 手机若弹「此 WLAN 无法访问互联网 / 是否保持连接」，请选 <b>保持连接</b> 或 <b>使用</b>——本热点不联外网，只用来打开这个页面。
-</div>
-<div id="st">加载中…</div>
-<label style="display:block;margin:6px 0;font-size:13px;color:#9be">
- <input type="checkbox" id="dbgChk" onchange="toggleDbg()" style="width:20px;height:20px;vertical-align:middle;margin-right:6px">调试信息
-</label>
-<div id="dbg" style="display:none;background:#0c1a12;color:#8f9;font-family:monospace;font-size:12px;padding:8px 12px;border-radius:8px;margin:6px 0;white-space:pre-wrap;line-height:1.8"></div>
-
-<div class="card"><h3>模式</h3><div class="btns" id="modes"></div></div>
-<div class="card"><h3>颜色</h3><div class="btns" id="colors"></div></div>
-<div class="card"><h3>速度</h3><div class="btns" id="speeds"></div></div>
-<div class="card"><h3>亮度</h3><div class="btns" id="brights"></div></div>
-
-<div class="card"><h3>LED 数量</h3>
- <div style="display:flex;gap:8px;align-items:center">
-  <input id="cnt" type="number" min="1" max="128" value="55"
-         style="flex:1;min-height:44px;background:#222;border:1px solid #333;color:#eee;border-radius:8px;font-size:16px;padding:0 10px">
-  <button style="flex:0 0 auto" onclick="setCount()">应用</button>
- </div>
- <div class="btns" style="margin-top:8px">
-  <button onclick="setCountV(32)">32</button>
-  <button onclick="setCountV(55)">55</button>
-  <button onclick="setCountV(60)">60</button>
-  <button onclick="setCountV(78)">78</button>
- </div>
- <div style="color:#888;font-size:12px;margin-top:6px">即时生效并断电记忆；与按键标定（长按 3 秒）等效</div>
-</div>
-
-<div class="card">
- <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi 和蓝牙（省电，需重启才能恢复）</button>
-</div>
-<div class="card">
- <button style="background:#1f3a52;border-color:#36c" onclick="location.href='/ota'">固件升级（WiFi OTA）</button>
-</div>
-<div id="toast"></div>
-
-<script>
-var M=["飞控(Betaflight)","单色常亮","单色呼吸","单色跑马","双边跑马","单色导向","单色增长","彩虹呼吸","彩虹渐变","双边彩虹"];
-var C=["白","红","黄","蓝","绿","青","品红","关"];
-var CS=["#fff","#f33","#ff3","#36f","#3f3","#0ff","#f3f","#000"];
-var S=["快","中","慢"];
-var B=["100%","75%","50%","25%"];
-var st={mode:0,color:0,speed:1,bright:2,calib:55,cal:0,v:"v32",ws:"",ble:"",bdiag:"",dns:0,boot:""};
-
-function render(){
- var ve=document.getElementById("ver"); if(ve)ve.textContent=st.v;
- document.getElementById("st").textContent =
-  "模式："+M[st.mode]+" · 颜色："+C[st.color]+" · 速度："+S[st.speed]+
-  " · 亮度："+B[st.bright]+" · 灯数："+st.calib+(st.cal?" · 标定中":"");
- dbgRefresh();
- var c=document.getElementById("cnt"); if(c)c.value=st.calib;
- var mm=document.getElementById("modes"); mm.innerHTML="";
- for(var i=0;i<10;i++){var b=document.createElement("button");b.textContent=i+" "+M[i];
-  if(i==st.mode)b.className="on";b.onclick=(function(n){return function(){set("mode",n);};})(i);mm.appendChild(b);}
- var cc=document.getElementById("colors"); cc.innerHTML="";
- for(var i=0;i<8;i++){var s=document.createElement("button");s.className="sw";
-  s.style.background=CS[i];if(i==st.color)s.classList.add("on");
-  s.title=C[i];s.onclick=(function(n){return function(){set("color",n);};})(i);cc.appendChild(s);}
- var ss=document.getElementById("speeds"); ss.innerHTML="";
- for(var i=0;i<3;i++){var b=document.createElement("button");b.textContent=S[i];
-  if(i==st.speed)b.className="on";b.onclick=(function(n){return function(){set("speed",n);};})(i);ss.appendChild(b);}
- var bb=document.getElementById("brights"); bb.innerHTML="";
- for(var i=0;i<4;i++){var b=document.createElement("button");b.textContent=B[i];
-  if(i==st.bright)b.className="on";b.onclick=(function(n){return function(){set("bright",n);};})(i);bb.appendChild(b);}
-}
-function set(k,n){fetch("/api/set?"+k+"="+n).then(function(r){return r.json();}).then(function(j){st=j;render();});}
-function setCount(){var n=parseInt(document.getElementById("cnt").value,10);
- if(!n||n<1||n>128){toast("请输入 1-128");return;}set("count",n);}
-function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
-// v32.20：不再用 confirm()。手机的内置浏览器（尤其是连热点时被拉起的那个
-// captive portal 认证页）经常把原生 confirm 直接拦掉、或者悄悄返回 false，
-// 表现就是「点了关闭 WiFi 但热点还在」——请求压根没发出去。
-// 改成按钮自己两段式：第一次点变成「再点一次确认」，4 秒内不点就复原。
-var offArm=0, offT=null;
-function offWifi(){
- var b=document.getElementById("btnOff");
- if(!offArm){
-   offArm=1;
-   b.textContent="再点一次，确认关闭";
-   b.style.background="#c62828";
-   offT=setTimeout(function(){offArm=0;b.textContent="关闭 WiFi 和蓝牙（省电，需重启才能恢复）";b.style.background="";},4000);
-   return;
- }
- clearTimeout(offT); offArm=0;
- b.disabled=true; b.textContent="正在关闭 WiFi 和蓝牙…";
- toast("正在关闭，热点和蓝牙会一起消失");
- fetch("/api/wifi/off").catch(function(){});
-}
-function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}
-function toggleDbg(){var d=document.getElementById("dbg");
- if(document.getElementById("dbgChk").checked){d.style.display="block";dbgRefresh();}else d.style.display="none";}
-function dbgRefresh(){var d=document.getElementById("dbg");
- if(!d||d.style.display=="none")return;
- d.textContent="固件版本 : "+(st.v||"n/a")+
-  "\nWiFi 状态 : "+(st.ws||"n/a")+
-  "\nDNS 劫持 : "+(st.dns?"ok":"fail/未启动")+
-  "\nBLE 状态 : "+(st.ble||"n/a")+
-  "\nBLE 透传 : "+(st.bdiag||"n/a")+"   （sub=已订阅 mtu=协商值 nf=通知成功/失败 probe=飞控探测）"+
-  "\n开机信息 : "+(st.boot||"n/a")+
-  "\n模式/颜色/速度/亮度 : "+st.mode+"/"+st.color+"/"+st.speed+"/"+st.bright+
-  "\nLED 数量 : "+st.calib+" 颗"+(st.cal?"（标定中）":"")+
-  "\n心跳 : "+JSON.stringify(st);}
-fetch("/api/state").then(function(r){return r.json();}).then(function(j){st=j;render();}).catch(function(){document.getElementById("st").textContent="连接失败";});
-</script>
-</body></html>)rawliteral";
-
-// v32.19：页面里用 @@DEVNAME@@ 占位，发出去之前替换成运行时设备名（带 MAC 后缀）。
-// 不用 snprintf 拼整个页面——HTML 有 10KB 左右，拼进 buffer 太费 RAM（还要留给 BLE），
-// 直接分块发送：占位符之前的一段 → 设备名 → 之后的一段。
-#define DEV_NAME_PH "@@DEVNAME@@"
+// ---------- HTTP：主页 ----------
+// v32.21：页面搬到 src/web_page.h（A+ 界面：灯光 / 连接 / 设备 三功能区）。
+// 页面里所有动态数值（设备名、SSID、倒计时、版本…）都从 /api/state 取，
+// 所以这里不再做 @@DEVNAME@@ 文本替换，直接整块发出去即可。
 static esp_err_t handler_root(httpd_req_t* req) {
     touchHttp();
     httpd_resp_set_hdr(req, "Content-Type", "text/html; charset=utf-8");
-    const char* ph = strstr(HTML_PAGE, DEV_NAME_PH);
-    if (!ph) { // 占位符被改掉了也不至于白屏，原样发
-        httpd_resp_sendstr(req, HTML_PAGE);
-        return ESP_OK;
-    }
-    esp_err_t e1 = httpd_resp_send_chunk(req, HTML_PAGE, (ssize_t)(ph - HTML_PAGE));
-    esp_err_t e2 = httpd_resp_send_chunk(req, DEV_NAME, HTTPD_RESP_USE_STRLEN);
-    esp_err_t e3 = httpd_resp_send_chunk(req, ph + strlen(DEV_NAME_PH), HTTPD_RESP_USE_STRLEN);
-    httpd_resp_send_chunk(req, NULL, 0); // 结束 chunked 响应
-    return (e1 == ESP_OK && e2 == ESP_OK && e3 == ESP_OK) ? ESP_OK : ESP_FAIL;
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, HTML_PAGE, HTTPD_RESP_USE_STRLEN);
 }
 
 // ========== Captive Portal：DNS 劫持（手机探测域名 → 192.168.4.1） ==========
@@ -484,57 +352,91 @@ static esp_err_t handler_captive_err(httpd_req_t* req, httpd_err_code_t err) {
     return handler_captive(req);
 }
 
-// ---------- 关闭全部（httpd + wifi + BLE） ----------
-// v32.20：以前的实现有三个问题，全部修掉——
-//   ① 每一步都不看返回码，esp_wifi_stop() 失败也照样打印「热点已关闭」，
-//      于是网页点了没反应、日志却说成功，完全没法查；
-//   ② s_stopping 在动作之前就置 true，一旦中途失败就再也不重试，热点永久挂着；
-//   ③ 直接在主循环（wifiCfgPoll）里调 httpd_stop()，它会等所有 keep-alive 连接
-//      收尾（浏览器每秒轮询 /api/state），主循环被卡住，灯带刷新跟着掉帧。
-//      现在关闭动作放独立任务里做。
-static void shutdownTask(void* arg) {
-    (void)arg;
-    // 先给 HTTP 响应留时间发出去，否则网页端看不到「已关闭」的提示
-    vTaskDelay(pdMS_TO_TICKS(500));
-    wifiStopAll();
-    bleUartStop(); // 一起关：用户要的是「只剩灯带功能」
-    printf("[PWR] WiFi 与蓝牙已关闭，只剩灯带功能；重启设备可恢复\n");
-    s_pwrTaskRun = false;
-    vTaskDelete(NULL);
-}
+// ---------- 关闭全部（WiFi + httpd + BLE） ----------
+// v32.21：这一版把「点了关不掉 / 1 分钟也不自动关」彻底改掉。前几版有四个坑：
+//   ① **顺序反了**：原来先 httpd_stop() 再 esp_wifi_stop()。httpd_stop() 会等所有
+//      keep-alive 连接收尾，而网页每秒轮询 /api/state，于是它一直在等 → 卡死。
+//      正确顺序是先 esp_wifi_stop()（所有 TCP 连接立刻断干净），再 httpd_stop()（秒回）。
+//   ② **s_stopping 一旦置上就永不复位**，而 wifiCfgPoll 首行是 `if (s_stopping) return;`
+//      —— 关闭一旦卡住，手动关不掉、闲置判定也全废。现在它只表示「正在进行」，
+//      任务结束（成功或彻底失败）都复位；poll 里还有 20 秒看门狗兜底。
+//   ③ 关闭动作原来放在临时任务里，xTaskCreate 失败就没戏。改成初始化时建一个
+//      常驻的 pwrTask，靠任务通知唤醒，创建只做一次、永不失败。
+//   ④ 每一步都不看返回码，失败也打印「已关闭」。现在三个返回码都打出来，失败重试 3 次。
+static volatile bool s_stopping = false;   // 关闭流程进行中
+static volatile bool s_pwrDone  = false;   // 已经关完了（之后不再判定）
+static volatile uint32_t s_offAtMs = 0;    // 本轮关闭开始时刻（ms，卡住判定用）
+static TaskHandle_t s_pwrTask = NULL;
 
-static void shutdownRequest(const char* why) {
-    if (s_pwrTaskRun) return;
-    s_pwrTaskRun = true;
-    s_stopping   = true; // 立刻冻结判定，避免每秒重复触发
-    printf("[PWR] 关闭无线，原因：%s\n", why);
-    if (xTaskCreate(shutdownTask, "pwrOff", 3072, NULL, 4, NULL) != pdPASS) {
-        printf("[PWR] 关闭任务创建失败，保持原状\n");
-        s_pwrTaskRun = false;
-        s_stopping   = false;
+// 真正动手：先停 WiFi → 停 httpd → 释放驱动。返回第一个非 OK 的错误码。
+static esp_err_t wifiStopAll() {
+    esp_err_t e1 = ESP_OK, e2 = ESP_OK, e3 = ESP_OK;
+
+    // ① 先停 WiFi：连接立刻断，后面 httpd_stop 不会被 keep-alive 挂住（本轮修的核心）
+    if (s_wifiUp) {
+        e1 = esp_wifi_stop();
+        if (e1 == ESP_ERR_WIFI_NOT_STARTED || e1 == ESP_ERR_WIFI_NOT_INIT) e1 = ESP_OK;
+        s_wifiUp = false;
     }
-}
 
-static void wifiStopAll() {
-    if (!s_wifiUp && !s_httpd) return;
-
-    esp_err_t e1 = ESP_OK;
+    // ② 再停 httpd（此时没有活连接）
     if (s_httpd) {
-        e1 = httpd_stop(s_httpd);
-        s_httpd = NULL; // 无论成败都置空：已经 stop 过一次，不能重复调
-    }
-    esp_err_t e2 = esp_wifi_stop();
-    esp_err_t e3 = ESP_OK;
-    if (e2 == ESP_OK) {
-        e3 = esp_wifi_deinit();
-    } else if (e2 == ESP_ERR_WIFI_NOT_INIT || e2 == ESP_ERR_WIFI_NOT_STARTED) {
-        e2 = ESP_OK; // 本来就没起来，视作已关闭
+        e2 = httpd_stop(s_httpd);
+        s_httpd = NULL; // 无论成败都置空：stop 过一次就不能再调
     }
 
-    s_wifiUp   = false;
+    // ③ 最后释放驱动（驱动没停成功就别 deinit，否则可能留个坏状态）
+    if (e1 == ESP_OK) {
+        e3 = esp_wifi_deinit();
+        if (e3 == ESP_ERR_WIFI_NOT_INIT) e3 = ESP_OK;
+    }
+
     s_cfgStr[0] = 0;
-    printf("[WiFi] 已关闭（httpd=%d wifi_stop=%d wifi_deinit=%d）\n",
+    printf("[WiFi] 关闭结果：wifi_stop=%d httpd_stop=%d wifi_deinit=%d\n",
            (int)e1, (int)e2, (int)e3);
+    return (e1 != ESP_OK) ? e1 : (e2 != ESP_OK ? e2 : e3);
+}
+
+// 常驻关闭任务：等通知 → 关蓝牙 → 关 WiFi/httpd → 失败重试 → 复位标志
+static void pwrTask(void* arg) {
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        int attempt = 0;
+        esp_err_t e = ESP_OK;
+        for (;;) {
+            bleUartStop();          // 先关蓝牙：独立协议栈，跟 WiFi 无关
+            e = wifiStopAll();
+            if (e == ESP_OK) break;
+            if (++attempt >= 3) {
+                printf("[PWR] 关闭失败（0x%x），已重试 %d 次，放弃\n", (unsigned)e, attempt);
+                break;
+            }
+            printf("[PWR] 关闭失败（0x%x），3 秒后第 %d 次重试\n", (unsigned)e, attempt);
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+        s_stopping = false;
+        s_pwrDone  = true; // 不论成败都不再判定，免得每秒重复触发/刷日志
+        printf("[PWR] 完成：热点已关、蓝牙已停，只剩灯带（断电重启可恢复）\n");
+    }
+}
+
+// 请求关闭：只置标志 + 唤醒任务，耗时动作一律不在主循环里做
+static void shutdownRequest(const char* why) {
+    if (s_stopping || s_pwrDone) return;
+    s_stopping = true;
+    s_offAtMs  = (uint32_t)(esp_timer_get_time() / 1000);
+    printf("[PWR] 关闭无线，原因：%s\n", why);
+    if (!s_pwrTask) {
+        // 极端兜底：任务没建起来（内存不足）。就地关，至少不会留个关不掉的热点。
+        printf("[PWR] 关闭任务不存在，主循环内直接关\n");
+        bleUartStop();
+        wifiStopAll();
+        s_stopping = false;
+        s_pwrDone  = true;
+        return;
+    }
+    xTaskNotifyGive(s_pwrTask);
 }
 
 // ---------- 初始化 ----------
@@ -581,7 +483,11 @@ void wifiCfgInit() {
         return;
     }
     char ib[16] = "-";
-    if (e9 == ESP_OK) snprintf(ib, sizeof(ib), IPSTR, IP2STR(&ip.ip));
+    if (e9 == ESP_OK) {
+        snprintf(ib, sizeof(ib), IPSTR, IP2STR(&ip.ip));
+        strncpy(s_ip, ib, sizeof(s_ip) - 1); // 网页「连接」页显示用
+        s_ip[sizeof(s_ip) - 1] = 0;
+    }
     snprintf(s_cfgStr, sizeof(s_cfgStr), "ok %s/%s%s",
              (e8 == ESP_OK) ? (const char*)cur.ap.ssid : "?",
              ib, (e8 != ESP_OK) ? " cfgE" : (e9 != ESP_OK) ? " ipE" : "");
@@ -592,7 +498,7 @@ void wifiCfgInit() {
     s_lastActUs  = s_startUs; // v32.20：闲置从 AP 起来这一刻算起
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 12; // 6 现有 + 2 OTA + 余量
+    hc.max_uri_handlers = 12; // 7 精确路由 + 2 OTA + 2 通配（v32.21 多了 POST /api/set）
     hc.stack_size = 4096;     // OTA handler 大缓冲均为 static，不占任务栈（省内存给 BLE）
     // ===== v32.16 关键修复 =====
     // HTTPD_DEFAULT_CONFIG() 里 uri_match_fn 是 NULL，此时 httpd 内部走的是
@@ -606,7 +512,8 @@ void wifiCfgInit() {
         static const httpd_uri_t u_root  = {.uri="/",          .method=HTTP_GET, .handler=handler_root,  .user_ctx=NULL};
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
         static const httpd_uri_t u_set   = {.uri="/api/set",   .method=HTTP_GET, .handler=handler_set,   .user_ctx=NULL};
-        static const httpd_uri_t u_off   = {.uri="/api/wifi/off", .method=HTTP_GET, .handler=handler_off, .user_ctx=NULL};
+        // v32.21：网页「应用」用 POST 一次提交全套参数，GET 那个留着给 curl 调试
+        static const httpd_uri_t u_setp  = {.uri="/api/set",   .method=HTTP_POST, .handler=handler_set,  .user_ctx=NULL};
         static const httpd_uri_t u_rb    = {.uri="/api/reboot",   .method=HTTP_GET, .handler=handler_reboot, .user_ctx=NULL};
         static const httpd_uri_t u_capt  = {.uri="/*",         .method=HTTP_GET, .handler=handler_captive, .user_ctx=NULL};
         // v32.17：华为/荣耀的联网探测会 POST /mtuprobe，之前只能落到 405 错误处理器再转 302，
@@ -616,7 +523,7 @@ void wifiCfgInit() {
         httpd_register_uri_handler(s_httpd, &u_root);
         httpd_register_uri_handler(s_httpd, &u_state);
         httpd_register_uri_handler(s_httpd, &u_set);
-        httpd_register_uri_handler(s_httpd, &u_off);
+        httpd_register_uri_handler(s_httpd, &u_setp); // POST 版；必须在通配之前注册
         httpd_register_uri_handler(s_httpd, &u_rb);
         otaHttpdRegister(s_httpd);                    // /ota 上传页 + /api/ota
         // 通配必须最后注册：httpd 按注册顺序线性匹配，先注册的精确路由优先；
@@ -626,13 +533,19 @@ void wifiCfgInit() {
         // 兜底：404/405 都交给 captive 处理器（POST/HEAD 探测也能被重定向）
         httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, handler_captive_err);
         httpd_register_err_handler(s_httpd, HTTPD_405_METHOD_NOT_ALLOWED, handler_captive_err);
-        printf("[WiFi] 热点 %s 已开启，有人在线不自动关；全部断开后 30 分钟无访问才关\n", WIFI_SSID);
+        printf("[WiFi] 热点 %s 已开启；无人使用满 60 秒会自动关 WiFi + 蓝牙\n", WIFI_SSID);
         printf("[CP] 通配路由已启用（uri_match_fn=wildcard），探测请求一律 302 → http://192.168.4.1/\n");
     } else {
         printf("[WiFi] httpd FAILED\n");
         s_httpd = NULL;
     }
     xTaskCreate(dnsTask, "dns", 4096, NULL, 5, NULL); // 常驻：热点关闭后无人查询，无害
+    // v32.21：关闭任务只建这一次，靠任务通知唤醒。放在这里而不是关的时候再建，
+    // 是因为「关不掉」的最常见原因就是关的时候建任务失败/来不及。
+    if (xTaskCreate(pwrTask, "pwrOff", 3072, NULL, 4, &s_pwrTask) != pdPASS) {
+        s_pwrTask = NULL;
+        printf("[PWR] 关闭任务创建失败：闲置到点会在主循环里关\n");
+    }
 }
 
 // ---------- 状态查询 ----------
@@ -661,11 +574,18 @@ const char* wifiCfgStr() {
 // 光广播不算在用，否则蓝牙一开着闲置计时就永远被顶住，永远关不掉。
 void wifiCfgPoll(uint32_t nowMs) {
     (void)nowMs;
-    if (s_stopping) return; // 正在关闭，别再判
+    if (s_pwrDone) return; // 已经关完，没什么可判
 
-    if (s_offRequested) { // 网页点了「关闭 WiFi」
-        s_offRequested = false;
-        shutdownRequest("网页手动关闭");
+    if (s_stopping) {
+        // v32.21：看门狗。正常关闭 1~2 秒就结束；超过 20 秒说明卡在某个驱动调用里
+        // （前几版就是卡在 httpd_stop）。这里把标志解开、重新唤醒任务再来一遍，
+        // 保证「一定会关掉」，而不是默默永远关不掉。
+        uint32_t el = (uint32_t)(esp_timer_get_time() / 1000) - s_offAtMs;
+        if (el > 20000) {
+            printf("[PWR] 关闭超过 %u 秒未完成，重新排队\n", (unsigned)(el / 1000));
+            s_stopping = false;
+            if (s_pwrTask) xTaskNotifyGive(s_pwrTask);
+        }
         return;
     }
 
@@ -687,7 +607,26 @@ void wifiCfgPoll(uint32_t nowMs) {
     uint64_t idleMs = (nowUs - s_lastActUs) / 1000;
     if (idleMs > IDLE_OFF_MS) {
         shutdownRequest("无线闲置满 60 秒");
+        return;
     }
+    // 每跨过 10 秒报一次剩余，串口能看到它确实在往 0 走
+    static int lastBucket = -1;
+    int left = (int)((IDLE_OFF_MS - idleMs) / 1000);
+    if (left / 10 != lastBucket) {
+        lastBucket = left / 10;
+        printf("[PWR] 无人使用，%d 秒后关闭 WiFi 与蓝牙\n", left);
+    }
+}
+
+// v32.21：网页「连接」页的倒计时。返回距自动关闭的秒数；
+//   -1 = 有人在用（有设备连着 / 蓝牙连着 / 已关完），不会自动关
+int wifiCfgIdleLeft() {
+    if (!s_wifiUp) return -1;
+    if (s_pwrDone || s_stopping) return 0;
+    if (s_staCount > 0 || bleUartActive()) return -1;
+    uint64_t used = (esp_timer_get_time() - s_lastActUs) / 1000;
+    if (used >= IDLE_OFF_MS) return 0;
+    return (int)((IDLE_OFF_MS - used) / 1000);
 }
 
 // v32.14：热点诊断串 "sta=N off=Ms"（off<0 表示有人在线、不会自动关；单为秒）

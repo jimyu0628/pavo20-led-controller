@@ -1,18 +1,19 @@
 #pragma once
 // ============================================================
 // WiFi 热点 + Web 设置（ESP32-C3 AP 模式）
-//   - 热点名 RGBled / 密码 12345678（WPA2）
-//   - 上电开启；从未有手机连接则 30s 后自动关闭
-//   - 手机连接过（曾连上）则保持；关闭网页（无 HTTP 请求）60s 后关闭
-//   - 网页点击"关闭 WiFi"立即关闭（需重启设备重新开启）
-//   - Web 设置：模式/颜色/速度/亮度（复用按键同一套状态）
+//   - 热点名 PavoLED-XX（与 BLE 广播名同源，device_name.h）/ 密码 12345678（WPA2）
+//   - 上电开启；captive portal（DNS 劫持 + 302）让手机自动弹控制页
+//   - v32.21 关闭策略：没有设备连热点、没有 HTTP 请求、没有蓝牙连接，
+//     三者同时安静满 60 秒 → 关 WiFi + 蓝牙，只留灯带（需断电重启才恢复）
+//     网页上不再提供「关闭 WiFi」按钮，全部交给闲置判定
+//   - Web 设置：模式/颜色/速度/亮度/灯带长度（复用按键同一套状态）
 // ============================================================
 #include <stdint.h>
 
 // 初始化 AP + HTTP 服务器（setup 中调用一次，需在 nvsInit 之后）
 void wifiCfgInit();
 
-// 主循环每秒调用：执行"关闭 WiFi"判定
+// 主循环每秒调用：执行闲置关闭判定（到点在 pwrTask 里真正动手）
 void wifiCfgPoll(uint32_t nowMs);
 
 // 热点状态：0=已关闭 1=开启(未连过) 2=开启(曾连/保持期)
@@ -27,14 +28,17 @@ void wifiCfgSetBootInfo(const char* s);
 const char* wifiCfgDiag();
 const char* wifiCfgBootInfo();
 
+// v32.21：距自动关闭还剩几秒（网页「连接」页倒计时）；-1 = 有人在用、不会关
+int wifiCfgIdleLeft();
+
 // DNS 劫持（captive portal）是否绑定成功：1=ok 0=fail/未启动
 int wifiCfgDnsOk();
 
 // ---- Web 设置接口（由 main.cpp 实现，读写主程序状态） ----
 int  webGetMode();
 int  webGetColor();
-int  webGetSpeed();
-int  webGetBright();
+int  webGetSpeed();   // v32.21：1~100（原来是 0/1/2 档位）
+int  webGetBright();  // v32.21：0~100（原来是 0~3 档位）
 int  webGetCalib();
 bool webIsCalibrating();
 void webSetMode(int v);
