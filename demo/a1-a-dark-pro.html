@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<title>方案 A+ · 直选 + 拖动</title>
+<style>
+  :root{
+    --bg:#0b0b0d; --card:#17171a; --card2:#1e1e22; --line:#2a2a30;
+    --txt:#ececee; --dim:#8a8a92; --dim2:#5e5e66;
+    --amber:#ffb454; --amber-d:#3a2a10; --blue:#2d7ff9; --green:#3ddc84;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+       padding:14px 14px 116px;max-width:560px;margin:0 auto;font-size:15px}
+
+  /* 顶栏 */
+  header{display:flex;align-items:center;gap:11px;padding:2px 2px 12px}
+  .logo{width:38px;height:38px;border-radius:11px;background:linear-gradient(150deg,#2a1c06,#181818);
+        border:1px solid #3a2a10;display:flex;align-items:center;justify-content:center;flex:0 0 auto}
+  .logo svg{width:21px;height:21px}
+  .htxt{flex:1;min-width:0}
+  .htxt h1{font-size:15.5px;margin:0;font-weight:650;letter-spacing:.2px}
+  .htxt .m{font-size:12px;color:var(--dim);margin-top:3px;display:flex;gap:7px;align-items:center}
+  .chip{font-size:10.5px;padding:2px 6px;border-radius:5px;background:#22222a;color:#b9b9c2;border:1px solid var(--line)}
+  .live{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--green);
+        background:#0f2418;border:1px solid #1c4530;padding:4px 9px;border-radius:20px;flex:0 0 auto}
+  .dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+
+  /* 吸顶预览 */
+  .preview{position:sticky;top:0;z-index:6;background:var(--bg);
+           margin:0 -14px 10px;padding:6px 14px 9px;border-bottom:1px solid #191920}
+  .preview canvas{display:block;width:100%;height:66px;background:#07070a;
+                  border-radius:10px;border:1px solid #23232a;
+                  box-shadow:inset 0 0 26px rgba(0,0,0,.9)}
+  .pvi{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-top:7px;min-height:18px}
+  .pvi .pm{color:var(--amber);font-weight:700;font-size:13px;letter-spacing:.2px}
+  .pvi .pd{font-size:11px;color:var(--dim2);font-variant-numeric:tabular-nums;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  /* 状态三格 */
+  .stats{display:grid;grid-template-columns:1.4fr 1fr 1fr;gap:8px;margin-bottom:11px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:9px 11px}
+  .stat .k{font-size:10.5px;color:var(--dim2);letter-spacing:.4px}
+  .stat .v{font-size:15px;font-weight:650;margin-top:3px;white-space:nowrap;
+           overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+  .stat .v.acc{color:var(--amber)}
+
+  /* 卡片 */
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px 13px 12px;margin-bottom:10px}
+  .card h2{font-size:12.5px;margin:0 0 4px;color:var(--dim);font-weight:600;letter-spacing:.6px;
+           display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .card h2 .hint{font-size:11px;color:var(--dim2);font-weight:400;letter-spacing:0}
+  .card h2 .val{font-size:13px;color:var(--amber);font-weight:700;letter-spacing:0;
+                font-variant-numeric:tabular-nums;white-space:nowrap}
+
+  /* 模式网格 */
+  .modes{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:8px}
+  .mode{display:flex;align-items:center;gap:8px;min-height:42px;padding:0 9px;border-radius:10px;
+        background:var(--card2);border:1px solid #26262c;color:#c7c7d0;font-size:13px;
+        text-align:left;font-family:inherit;cursor:pointer;
+        transition:background .12s,border-color .12s,color .12s}
+  .mode .n{width:18px;height:18px;border-radius:5px;background:#2c2c34;color:#7b7b85;font-size:10.5px;
+           display:flex;align-items:center;justify-content:center;flex:0 0 auto;font-variant-numeric:tabular-nums}
+  .mode:active{transform:scale(.985)}
+  .mode.on{background:var(--amber-d);border-color:#8a6320;color:var(--amber);font-weight:600}
+  .mode.on .n{background:#8a6320;color:#1a1000}
+
+  /* ===== 通用轨道：点方块直选 + 按住拖动无级 ===== */
+  .rail{position:relative;padding:15px 10px 4px;touch-action:none;cursor:pointer;
+        user-select:none;-webkit-user-select:none}
+  .rail .rt{position:relative;height:34px;background:#101014;border:1px solid #26262c;
+            border-radius:9px;overflow:hidden;transition:border-color .14s,box-shadow .14s}
+  .rail.dragging .rt{border-color:#8a6320;box-shadow:0 0 0 3px rgba(255,180,84,.09)}
+  .rail .rf{position:absolute;left:0;top:0;bottom:0;width:0;pointer-events:none;
+            background:linear-gradient(90deg,rgba(255,180,84,.06),rgba(255,180,84,.22))}
+  .rail .rticks{position:absolute;inset:0;pointer-events:none}
+  .rail .tick{position:absolute;top:50%;width:5px;height:15px;border-radius:2px;
+              background:#33333d;transition:background .12s,box-shadow .12s}
+  .rail .tick.on{background:var(--amber);box-shadow:0 0 9px rgba(255,180,84,.8)}
+  .rail .rk{position:absolute;top:4px;bottom:4px;width:3px;transform:translateX(-50%);
+            background:#fff;border-radius:2px;pointer-events:none;
+            box-shadow:0 0 8px rgba(255,255,255,.55)}
+  .rail .rb{position:absolute;top:-12px;left:0;transform:translateX(-50%);
+            background:#f0f0f4;color:#111;font-size:12.5px;font-weight:700;
+            padding:4px 9px;border-radius:11px;white-space:nowrap;
+            opacity:0;transition:opacity .14s;pointer-events:none;z-index:4;
+            font-variant-numeric:tabular-nums;box-shadow:0 3px 12px rgba(0,0,0,.5)}
+  .rail.dragging .rb{opacity:1}
+  .rail.dragging .rk{box-shadow:0 0 14px rgba(255,255,255,.8)}
+  .rail .ends{display:flex;justify-content:space-between;margin-top:5px;
+              font-size:10.5px;color:var(--dim2);font-variant-numeric:tabular-nums}
+
+  /* 色相轨道 */
+  .rail.hue .rt{background:linear-gradient(90deg,
+      hsl(0,100%,50%),hsl(45,100%,50%),hsl(90,100%,50%),hsl(135,100%,50%),
+      hsl(180,100%,50%),hsl(225,100%,50%),hsl(270,100%,50%),hsl(315,100%,50%),hsl(360,100%,50%));
+      border-color:#33333b}
+  .rail.hue .rf,.rail.hue .rticks{display:none}
+  .rail.hue .rk{width:5px;background:#fff;top:1px;bottom:1px;
+                box-shadow:0 0 0 1.5px rgba(0,0,0,.6),0 0 12px rgba(255,255,255,.7)}
+
+  /* 色块 */
+  .colors{display:grid;grid-template-columns:repeat(8,1fr);gap:9px;margin-top:11px}
+  .sw{width:100%;aspect-ratio:1;border-radius:50%;border:2px solid #3a3a44;padding:0;
+      cursor:pointer;position:relative;transition:transform .12s,box-shadow .12s;
+      box-shadow:inset 0 0 0 1px rgba(0,0,0,.3)}
+  .sw:active{transform:scale(.93)}
+  .sw.on{border-color:#fff;transform:scale(1.08);box-shadow:0 0 0 3px rgba(255,255,255,.14)}
+
+  /* 分隔 */
+  .sep{height:1px;background:#212127;margin:6px 0 2px}
+
+  /* 操作按钮 */
+  .actions{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-bottom:10px}
+  .btn{display:flex;align-items:center;justify-content:center;gap:7px;min-height:54px;border-radius:12px;
+       text-decoration:none;font-size:14px;font-weight:600;border:1px solid #2c2c34;
+       background:var(--card2);color:#d6d6de}
+  .btn svg{width:17px;height:17px;flex:0 0 auto}
+  .btn.primary{background:linear-gradient(180deg,#3488ff,#2069e0);border-color:#4f97ff;color:#fff;
+               box-shadow:0 6px 18px rgba(45,127,249,.28)}
+  .warn{font-size:11.5px;color:#c08a3e;background:#1c1408;border-left:2px solid #7a5410;
+        padding:8px 10px;border-radius:0 8px 8px 0;line-height:1.7;margin-bottom:10px}
+
+  /* 底部空闲条 */
+  .idlebar{position:fixed;left:0;right:0;bottom:0;background:rgba(14,14,16,.96);backdrop-filter:blur(10px);
+           border-top:1px solid var(--line);padding:9px 16px;
+           display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11.5px;color:var(--dim)}
+  .idlebar b{color:var(--amber);font-variant-numeric:tabular-nums}
+  .idlebar .bar{flex:1;height:3px;background:#242429;border-radius:3px;overflow:hidden;margin:0 4px}
+  .idlebar .bar i{display:block;height:100%;width:62%;background:var(--amber);border-radius:3px;transition:width 1s linear}
+
+  #toast{position:fixed;left:50%;bottom:66px;transform:translateX(-50%) translateY(16px);
+         background:#f0f0f4;color:#111;font-size:12.5px;font-weight:600;padding:8px 15px;border-radius:20px;
+         opacity:0;transition:.2s;pointer-events:none;white-space:nowrap;z-index:20}
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+  /* 用法提示条 */
+  .tip{display:flex;gap:6px;align-items:flex-start;font-size:11.5px;color:#8d8d97;
+       background:#131317;border-radius:8px;padding:7px 9px;
+       line-height:1.55;margin-top:8px}
+  .tip b{color:var(--amber);font-weight:600}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#ffb454" stroke-width="1.8" stroke-linecap="round">
+      <path d="M2 12h3M8 12h1M13 12h1M18 12h1M22 12h.01"/>
+      <circle cx="5" cy="12" r="1.6" fill="#ffb454" stroke="none"/>
+      <circle cx="11" cy="12" r="1.6" fill="#ffb454" stroke="none"/>
+      <circle cx="16" cy="12" r="1.6" fill="#ffb454" stroke="none"/>
+      <circle cx="20.5" cy="12" r="1.6" fill="#ffb454" stroke="none"/>
+    </svg>
+  </div>
+  <div class="htxt">
+    <h1>幻彩灯带控制板</h1>
+    <div class="m"><span>PavoLED-A3</span><span class="chip">v32.21</span></div>
+  </div>
+  <div class="live"><span class="dot"></span>在线 1</div>
+</header>
+
+<!-- 吸顶预览：拖下面任何滑块，这里立刻能看到光效 -->
+<div class="preview">
+  <canvas id="cv"></canvas>
+  <div class="pvi">
+    <span class="pm" id="pvMode">导向</span>
+    <span class="pd" id="pvDesc">亮度 55% · 速度 55 · 55 颗</span>
+  </div>
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="k">当前模式</div><div class="v acc" id="sMode">导向</div></div>
+  <div class="stat"><div class="k">亮度</div><div class="v" id="sBright">55%</div></div>
+  <div class="stat"><div class="k">灯数</div><div class="v" id="sCount">55</div></div>
+</div>
+
+<div class="card">
+  <h2>灯光模式 <span class="hint">点选即时生效</span></h2>
+  <div class="modes" id="modes"></div>
+</div>
+
+<div class="card">
+  <h2>亮度 <span class="val" id="hBright">55%</span></h2>
+  <div class="rail" id="railBright">
+    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+    <div class="rb">55%</div>
+    <div class="ends"><span>0</span><span>100</span></div>
+  </div>
+  <div class="sep"></div>
+  <h2>速度 <span class="val" id="hSpd">中 55</span></h2>
+  <div class="rail" id="railSpd">
+    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+    <div class="rb">55</div>
+    <div class="ends"><span>很慢</span><span>很快</span></div>
+  </div>
+  <div class="tip"><span>·</span><span><b>点方块</b> = 直接跳到该档；<b>按住任意位置左右拖</b> = 无级微调。拖动时看上方灯带。</span></div>
+</div>
+
+<div class="card">
+  <h2>颜色 <span class="val" id="hHue">琥珀</span></h2>
+  <div class="rail hue" id="railHue">
+    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+    <div class="rb">32°</div>
+    <div class="ends"><span>0°</span><span>360°</span></div>
+  </div>
+  <div class="colors" id="colors"></div>
+  <div class="tip"><span>·</span><span>彩虹类模式不受这里的颜色影响，会自己循环变色。</span></div>
+</div>
+
+<div class="card">
+  <h2>灯带长度 <span class="val" id="hCount">55 颗</span></h2>
+  <div class="rail" id="railCount">
+    <div class="rt"><div class="rf"></div><div class="rticks"></div><div class="rk"></div></div>
+    <div class="rb">55 颗</div>
+    <div class="ends"><span>1</span><span>128</span></div>
+  </div>
+  <div class="tip"><span>·</span><span>改完断电记忆；灯带实际颗数要比这里设定的多，最后一段不亮才正常。</span></div>
+</div>
+
+<div class="actions">
+  <a class="btn primary" href="https://app.betaflight.com" target="_blank" rel="noopener">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 17l6-6 4 4 8-8"/><path d="M21 7v5h-5"/>
+    </svg>
+    飞控调参
+  </a>
+  <a class="btn" href="#">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>
+    </svg>
+    固件升级
+  </a>
+</div>
+
+<div class="warn">
+  连着本热点时上面的「飞控调参」打不开（本热点不联外网）。要离线用，请先断开热点、用移动数据打开
+  app.betaflight.com 并「添加到主屏幕」；或用蓝牙连同名设备调参。
+</div>
+
+<div class="idlebar">
+  <span>无线空闲 <b id="idle">00:42</b> 后自动关闭</span>
+  <span class="bar"><i id="idlebar"></i></span>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ================= 状态 ================= */
+var MODES = ["飞控同步","常亮","呼吸","跑马","双边跑马","导向","增长","彩虹呼吸","彩虹渐变","双边彩虹"];
+
+/* 色块：h = 色相（-1 表示无彩色），s = 饱和 */
+var COLORS = [
+  {n:"白",   h:-1,  s:0,   css:"#ffffff"},
+  {n:"红",   h:4,   s:100, css:"#ff3b30"},
+  {n:"琥珀", h:32,  s:100, css:"#ffb454"},
+  {n:"黄",   h:50,  s:100, css:"#ffd60a"},
+  {n:"绿",   h:146, s:100, css:"#22c55e"},
+  {n:"青",   h:189, s:100, css:"#22d3ee"},
+  {n:"蓝",   h:217, s:100, css:"#3b82f6"},
+  {n:"品红", h:292, s:100, css:"#e879f9"}
+];
+
+var st = { mode:5, hue:32, sat:100, bright:55, spd:55, count:55 };
+
+/* ================= 工具 ================= */
+function $(id){ return document.getElementById(id); }
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function spdLabel(v){
+  if(v < 20) return "很慢";
+  if(v < 40) return "慢";
+  if(v < 65) return "中";
+  if(v < 85) return "快";
+  return "很快";
+}
+function nameOfHue(v){
+  for(var i=0;i<COLORS.length;i++){
+    var c = COLORS[i];
+    if(c.h >= 0 && Math.abs(c.h - v) <= 3) return c.n;
+  }
+  return "";
+}
+function hueName(){
+  if(st.sat === 0) return "白";
+  for(var i=0;i<COLORS.length;i++){
+    var c = COLORS[i];
+    if(c.h >= 0 && st.sat > 0 && Math.abs(c.h - st.hue) <= 5) return c.n;
+  }
+  return "自定义 " + st.hue + "°";
+}
+
+/* ================= 顶部信息同步 ================= */
+function syncInfo(){
+  $("sMode").textContent   = MODES[st.mode];
+  $("sBright").textContent = st.bright + "%";
+  $("sCount").textContent  = st.count;
+  $("pvMode").textContent  = MODES[st.mode];
+  $("pvDesc").textContent  = "亮度 " + st.bright + "% · 速度 " + st.spd +
+                             " · " + st.count + " 颗 · " + hueName();
+  $("hBright").textContent = st.bright + "%";
+  $("hSpd").textContent    = spdLabel(st.spd) + " " + st.spd;
+  $("hCount").textContent  = st.count + " 颗";
+  $("hHue").textContent    = hueName();
+  renderSw();
+}
+
+/* ================= 通用轨道 =================
+   cfg: {id, min, max, ticks:[], get(), set(v), fmt(v), hint(el)}
+   交互：pointerdown 立即跳到该位置；按住左右拖 = 连续调整
+   ============================================ */
+function makeRail(cfg){
+  var box    = $(cfg.id);
+  var track  = box.querySelector(".rt");
+  var fill   = box.querySelector(".rf");
+  var knob   = box.querySelector(".rk");
+  var bubble = box.querySelector(".rb");
+  var tickBox= box.querySelector(".rticks");
+
+  var span = cfg.max - cfg.min;
+  function pct(v){ return span === 0 ? 0 : (v - cfg.min) / span; }
+  function fromPct(p){ return Math.round(cfg.min + p * span); }
+
+  /* 生成刻度方块（可视为"直选档位"） */
+  var ticks = [];
+  if(cfg.ticks){
+    for(var k=0;k<cfg.ticks.length;k++){
+      var v = cfg.ticks[k];
+      var d = document.createElement("i");
+      d.className = "tick";
+      var lp = pct(v) * 100;
+      d.style.left = lp.toFixed(3) + "%";
+      /* 贴在轨道两端的方块如果还做 -50% 位移，一半会被 overflow 裁掉，看起来往里缩 */
+      d.style.transform = "translate(" + (lp < 2 ? "0" : (lp > 98 ? "-100%" : "-50%")) + ",-50%)";
+      tickBox.appendChild(d);
+      ticks.push({v:v, el:d});
+    }
+  }
+
+  function render(){
+    var v = cfg.get();
+    var p = clamp(pct(v), 0, 1);
+    if(fill) fill.style.width = (p*100).toFixed(2) + "%";
+    knob.style.left = (p*100).toFixed(2) + "%";
+    if(bubble) bubble.textContent = cfg.fmt(v);
+    /* 离当前值最近的那个方块点亮 —— 拖到两档之间也能看出落在哪一档 */
+    var best = -1, bd = 1e9;
+    for(var i=0;i<ticks.length;i++){
+      var dd = Math.abs(ticks[i].v - v);
+      if(dd < bd){ bd = dd; best = i; }
+    }
+    for(var i=0;i<ticks.length;i++){
+      ticks[i].el.classList.toggle("on", i === best);
+    }
+  }
+
+  var dragging = false;
+  function valueAt(clientX){
+    var r = track.getBoundingClientRect();
+    var p = (clientX - r.left) / r.width;
+    return fromPct(clamp(p, 0, 1));
+  }
+  function put(v){
+    if(v !== cfg.get()){
+      cfg.set(v);
+      if(navigator.vibrate) { try{ navigator.vibrate(6); }catch(e){} }
+    }
+    render();
+    syncInfo();
+  }
+
+  box.addEventListener("pointerdown", function(e){
+    if(e.pointerType === "mouse" && e.button !== 0) return;
+    dragging = true;
+    box.classList.add("dragging");
+    try{ box.setPointerCapture(e.pointerId); }catch(err){}
+    put(valueAt(e.clientX));
+    e.preventDefault();
+  });
+  box.addEventListener("pointermove", function(e){
+    if(!dragging) return;
+    put(valueAt(e.clientX));
+    e.preventDefault();
+  });
+  function stop(){
+    if(!dragging) return;
+    dragging = false;
+    box.classList.remove("dragging");
+  }
+  box.addEventListener("pointerup", stop);
+  box.addEventListener("pointercancel", stop);
+
+  box._render = render;
+  render();
+  return box;
+}
+
+/* ================= 色块 ================= */
+function renderSw(){
+  var box = $("colors");
+  for(var i=0;i<box.children.length;i++){
+    var c = COLORS[i], b = box.children[i];
+    var on = (c.h < 0) ? (st.sat === 0)
+                       : (st.hue === c.h && st.sat > 0);
+    b.classList.toggle("on", on);
+  }
+}
+function buildColors(){
+  var box = $("colors");
+  box.innerHTML = "";
+  for(var i=0;i<COLORS.length;i++){
+    (function(c){
+      var b = document.createElement("button");
+      b.className = "sw";
+      b.style.background = c.css;
+      b.title = c.n;
+      b.onclick = function(){
+        st.sat = c.s;
+        if(c.h >= 0) st.hue = c.h;
+        railHue._render();
+        syncInfo();
+        toast("颜色：" + c.n);
+      };
+      box.appendChild(b);
+    })(COLORS[i]);
+  }
+}
+
+/* ================= 模式 ================= */
+function buildModes(){
+  var box = $("modes");
+  box.innerHTML = "";
+  for(var i=0;i<MODES.length;i++){
+    (function(i){
+      var b = document.createElement("button");
+      b.className = "mode" + (i === st.mode ? " on" : "");
+      b.innerHTML = '<span class="n">' + ("0"+i).slice(-2) + "</span><span>" + MODES[i] + "</span>";
+      b.onclick = function(){
+        st.mode = i;
+        var bs = box.children;
+        for(var k=0;k<bs.length;k++) bs[k].classList.toggle("on", k === i);
+        syncInfo();
+        toast("模式：" + MODES[i]);
+      };
+      box.appendChild(b);
+    })(i);
+  }
+}
+
+/* ================= 灯带预览（Canvas） =================
+   每帧算出每颗灯的色相/饱和/亮度，拖滑块立即可见
+   ==================================================== */
+function px(i, n, t){
+  var per  = Math.max(300, 2400 - st.spd * 21);   /* 周期 ms：速度越大越快 */
+  var ph   = (t % per) / per;                     /* 0..1 */
+  var d    = Math.max(1, n - 1);
+  var h = st.hue, s = st.sat, v = 1;
+
+  switch(st.mode){
+    case 0: { /* 飞控同步：无数据时的低亮扫描 */
+      var q = ((t / 2600) % 1);
+      var dd0 = Math.abs(i / d - q);
+      v = 0.14 + 0.86 * Math.exp(-dd0 * dd0 * 90);
+      break;
+    }
+    case 1: v = 1; break;                                  /* 常亮 */
+    case 2: v = 0.06 + 0.94 * (0.5 + 0.5 * Math.sin(ph * 6.2832 - 1.5708)); break; /* 呼吸 */
+    case 3: { /* 跑马：单点环绕 */
+      var p3 = ph * n;
+      var dd3 = Math.abs(i - p3); dd3 = Math.min(dd3, n - dd3);
+      v = Math.exp(-dd3 * dd3 * 0.9);
+      break;
+    }
+    case 4: { /* 双边跑马：两头相向 */
+      var p1 = ph * n, p2 = (1 - ph) * n;
+      var a1 = Math.abs(i - p1), a2 = Math.abs(i - p2);
+      v = Math.max(Math.exp(-a1*a1*0.9), Math.exp(-a2*a2*0.9));
+      break;
+    }
+    case 5: { /* 导向：彗星带尾（头在最前，尾巴拖在后面） */
+      var p5 = ph * n;
+      var dd5 = (i - p5 + n) % n;   /* i 比头靠后就小 → 亮；靠前就大 → 暗 */
+      var tail = n * 0.45;
+      v = dd5 < tail ? Math.pow(1 - dd5 / tail, 2.0) : 0;
+      break;
+    }
+    case 6: { /* 增长：长满再收回 */
+      var k = ph < 0.55 ? ph / 0.55 : 1 - (ph - 0.55) / 0.45;
+      v = (i / d) <= k ? 1 : 0.02;
+      break;
+    }
+    case 7: /* 彩虹呼吸 */
+      h = i / d * 360;
+      v = 0.08 + 0.92 * (0.5 + 0.5 * Math.sin(ph * 6.2832));
+      break;
+    case 8: /* 彩虹渐变流动 */
+      h = (i / d * 360 + ph * 360) % 360;
+      v = 1;
+      break;
+    case 9: /* 双边彩虹：中间向两端对称 */
+      h = Math.abs(2 * i / d - 1) * 360;
+      v = 1;
+      break;
+  }
+
+  v *= st.bright / 100;
+  if(st.mode >= 7) s = 100;              /* 彩虹类强制高饱和 */
+  return [h, s, v];
+}
+
+function drawStrip(t){
+  var cv = $("cv");
+  var dpr = window.devicePixelRatio || 1;
+  var w = cv.clientWidth, h = cv.clientHeight;
+  if(!w || !h) return;
+  if(cv.width !== Math.round(w*dpr) || cv.height !== Math.round(h*dpr)){
+    cv.width  = Math.round(w*dpr);
+    cv.height = Math.round(h*dpr);
+  }
+  var g = cv.getContext("2d");
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+
+  var n   = st.count;
+  var pad = 7;
+  var span= w - pad*2;
+  var gap = span / n;
+  var r   = Math.max(1.0, Math.min(gap * 0.42, h * 0.40));
+  var cy  = h / 2;
+
+  for(var i=0;i<n;i++){
+    var x = pad + gap * (i + 0.5);
+    var c = px(i, n, t);
+    var v = c[2];
+
+    /* 底座：未点亮时的暗点，让灯带颗数一目了然 */
+    g.beginPath();
+    g.arc(x, cy, Math.max(r, 1), 0, 6.2832);
+    g.fillStyle = "rgba(255,255,255,0.075)";
+    g.fill();
+
+    if(v > 0.015){
+      var l = 13 + 47 * Math.min(1, v);
+      var col = "hsl(" + c[0].toFixed(0) + "," + c[1].toFixed(0) + "%," + l.toFixed(1) + "%)";
+      g.fillStyle = col;
+      g.shadowColor = col;
+      g.shadowBlur = 4 + 11 * v;
+      g.beginPath();
+      g.arc(x, cy, r, 0, 6.2832);
+      g.fill();
+      g.shadowBlur = 0;
+    }
+  }
+}
+
+var t0 = 0;
+function loop(ts){
+  if(!t0) t0 = ts;
+  drawStrip(ts - t0);
+  requestAnimationFrame(loop);
+}
+
+/* ================= toast ================= */
+var tt = null;
+function toast(t){
+  var d = $("toast");
+  d.textContent = t;
+  d.classList.add("show");
+  clearTimeout(tt);
+  tt = setTimeout(function(){ d.classList.remove("show"); }, 1500);
+}
+
+/* ================= 初始化 ================= */
+var railBright, railSpd, railHue, railCount;
+
+buildModes();
+buildColors();
+
+railBright = makeRail({
+  id:"railBright", min:0, max:100,
+  ticks:[0,10,20,30,40,50,60,70,80,90,100],
+  get:function(){ return st.bright; },
+  set:function(v){ st.bright = v; },
+  fmt:function(v){ return v + "%"; }
+});
+
+railSpd = makeRail({
+  id:"railSpd", min:1, max:100,
+  ticks:[1,25,50,75,100],
+  get:function(){ return st.spd; },
+  set:function(v){ st.spd = v; },
+  fmt:function(v){ return spdLabel(v) + " " + v; }
+});
+
+railHue = makeRail({
+  id:"railHue", min:0, max:359,
+  ticks:[],
+  get:function(){ return st.hue; },
+  set:function(v){ st.hue = v; st.sat = 100; },
+  fmt:function(v){ var nm = nameOfHue(v); return (nm ? nm + " · " : "") + v + "°"; }
+});
+
+railCount = makeRail({
+  id:"railCount", min:1, max:128,
+  ticks:[1,16,32,55,80,110,128],
+  get:function(){ return st.count; },
+  set:function(v){ st.count = v; },
+  fmt:function(v){ return v + " 颗"; }
+});
+
+syncInfo();
+requestAnimationFrame(loop);
+
+/* 空闲倒计时（演示：60 秒循环） */
+var left = 42;
+setInterval(function(){
+  left = left > 0 ? left - 1 : 60;
+  $("idle").textContent = "00:" + (left < 10 ? "0" : "") + left;
+  $("idlebar").style.width = (left / 60 * 100) + "%";
+}, 1000);
+</script>
+</body>
+</html>
