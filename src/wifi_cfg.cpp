@@ -207,7 +207,10 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   ③ 电脑装桌面版的话，端口选 <code>Manual Selection</code>，填 <code>tcp://192.168.4.1</code>。
  </div>
 </div>
-<div class="sub">WiFi 热点：RGBled · 密码 12345678 · 无操作 60 秒后自动关闭</div>
+<div class="sub">WiFi 密码 12345678 · 有人连着就不会自动关闭</div>
+<div style="font-size:12px;color:#666;margin:6px 0 10px;line-height:1.7">
+ 手机若弹「此 WLAN 无法访问互联网 / 是否保持连接」，请选 <b>保持连接</b> 或 <b>使用</b>——本热点不联外网，只用来打开这个页面。
+</div>
 <div id="st">加载中…</div>
 <label style="display:block;margin:6px 0;font-size:13px;color:#9be">
  <input type="checkbox" id="dbgChk" onchange="toggleDbg()" style="width:20px;height:20px;vertical-align:middle;margin-right:6px">调试信息
@@ -384,21 +387,34 @@ static esp_err_t handler_captive(httpd_req_t* req) {
         return sendPlain404(req);
     }
     touchHttp();
+    // v32.17：favicon 单独回 204。之前它也 302 回首页，于是每开一次页面就多一轮
+    // 「favicon 302 → 首页 200」，日志里还跟着一串 error in recv : 104（客户端等不到
+    // 图标直接 RST）。回空 204 最省事，浏览器不会再要。
+    if (strcmp(req->uri, "/favicon.ico") == 0) {
+        httpd_resp_set_status(req, "204 No Content");
+        return httpd_resp_send(req, NULL, 0);
+    }
     // v32.14：把探测请求打印出来——自动弹窗不生效时，先看清手机的探测到底打到哪条路径
     // （安卓 generate_204 / 苹果 hotspot-detect.html / 小米 connect.rom.miui.com / 华为 …）
+    // v32.17：带上方法名。华为会 POST /mtuprobe，和 GET 的 generate204 分开看更清楚。
     {
+        const char* m = (req->method == HTTP_GET)  ? "GET"
+                      : (req->method == HTTP_POST) ? "POST" : "其他";
         char host[64] = "-";
         if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) {
             host[0] = '-';
             host[1] = 0;
         }
-        printf("[CP] %s%s -> 302\n", host, req->uri);
+        printf("[CP] %s %s%s -> 302\n", m, host, req->uri);
     }
     // 绝对地址重定向：手机探测逻辑按完整 URL 判断是否 captive（相对地址部分机型不弹窗）。
     // v32.12：加 no-store，避免探测结果被缓存后第二次连热点不再弹窗。
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
+    // v32.17：探测客户端拿到 302 就走了，不会复用这条连接；显式声明 close，
+    // 免得 httpd 还挂着 socket 等下一个请求，把宝贵的 socket 槽位占满。
+    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr(req,
         "<html><meta http-equiv=\"refresh\" content=\"0;url=http://192.168.4.1/\">"
@@ -501,6 +517,10 @@ void wifiCfgInit() {
         static const httpd_uri_t u_off   = {.uri="/api/wifi/off", .method=HTTP_GET, .handler=handler_off, .user_ctx=NULL};
         static const httpd_uri_t u_rb    = {.uri="/api/reboot",   .method=HTTP_GET, .handler=handler_reboot, .user_ctx=NULL};
         static const httpd_uri_t u_capt  = {.uri="/*",         .method=HTTP_GET, .handler=handler_captive, .user_ctx=NULL};
+        // v32.17：华为/荣耀的联网探测会 POST /mtuprobe，之前只能落到 405 错误处理器再转 302，
+        // 每轮都先冒一行 W httpd_uri: Method '3' not allowed。直接注册 POST 通配，少一层噪音，
+        // 也避免某些 ROM 把 405 当成「服务器故障」而不是「需要认证」。
+        static const httpd_uri_t u_captp = {.uri="/*",         .method=HTTP_POST, .handler=handler_captive, .user_ctx=NULL};
         httpd_register_uri_handler(s_httpd, &u_root);
         httpd_register_uri_handler(s_httpd, &u_state);
         httpd_register_uri_handler(s_httpd, &u_set);
@@ -510,6 +530,7 @@ void wifiCfgInit() {
         // 通配必须最后注册：httpd 按注册顺序线性匹配，先注册的精确路由优先；
         // 若通配在前，/ota 页面会被它抢走并 302 回首页。
         httpd_register_uri_handler(s_httpd, &u_capt);
+        httpd_register_uri_handler(s_httpd, &u_captp); // POST 通配同理：必须排在 /api/ota 之后
         // 兜底：404/405 都交给 captive 处理器（POST/HEAD 探测也能被重定向）
         httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, handler_captive_err);
         httpd_register_err_handler(s_httpd, HTTPD_405_METHOD_NOT_ALLOWED, handler_captive_err);
