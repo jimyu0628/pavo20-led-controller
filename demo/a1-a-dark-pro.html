@@ -11,6 +11,15 @@
     --amber:#ffb454; --amber-d:#3a2a10; --blue:#2d7ff9; --green:#3ddc84;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  /* 滚动条常驻占位：三页内容长短不同，不加这个的话有没有滚动条会让整页宽度差 15px，
+     切页时文字会横向抖一下。overflow-y:scroll 才是真正让它常驻的那一句，
+     scrollbar-gutter 在根元素上单独用不生效。 */
+  html{overflow-y:scroll;scrollbar-gutter:stable;scrollbar-width:thin;
+       scrollbar-color:#33333d #0b0b0d}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-track{background:#0b0b0d}
+  ::-webkit-scrollbar-thumb{background:#33333d;border-radius:9px;border:2px solid #0b0b0d}
+  ::-webkit-scrollbar-thumb:hover{background:#43434e}
   body{margin:0;background:var(--bg);color:var(--txt);
        font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
        padding:14px 14px 30px;max-width:560px;margin:0 auto;font-size:15px}
@@ -28,6 +37,11 @@
   .live{display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--green);
         background:#0f2418;border:1px solid #1c4530;padding:4px 9px;border-radius:20px;flex:0 0 auto}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+  .iconbtn{width:34px;height:34px;flex:0 0 auto;border-radius:10px;border:1px solid var(--line);
+           background:#191920;color:#b9b9c2;font-family:inherit;font-size:15px;font-weight:700;
+           display:flex;align-items:center;justify-content:center;cursor:pointer;line-height:1;
+           transition:background .12s,transform .1s}
+  .iconbtn:active{transform:scale(.93);background:#23232b}
 
   /* ================= 一级：功能区标签（灯光 / 连接 / 设备） ================= */
   .ftabs{position:sticky;top:0;z-index:8;display:flex;gap:2px;
@@ -212,6 +226,67 @@
        background:#131317;border-radius:8px;padding:7px 9px;line-height:1.55;margin-top:10px}
   .tip b{color:var(--amber);font-weight:600}
 
+  /* ===== 固件升级面板（设备页内展开） ===== */
+  .otabox{display:none;margin-top:10px}
+  .otabox.show{display:block;animation:fade .18s ease-out}
+  .filepick{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px;
+            min-height:70px;padding:12px;border:1.5px dashed #3a3a44;border-radius:12px;
+            background:#141418;color:#a9a9b3;font-size:13px;font-weight:600;
+            text-align:center;cursor:pointer;transition:border-color .15s,background .15s,color .15s}
+  .filepick small{display:block;font-size:10.5px;color:var(--dim2);font-weight:400;
+                  line-height:1.5;margin-top:3px;word-break:break-all}
+  .filepick.has{border-style:solid;border-color:#8a6320;background:#1a1409;color:var(--amber)}
+  .filepick.has small{color:#9a7a44}
+  .pbar{height:8px;background:#232329;border-radius:8px;overflow:hidden;margin:12px 0 0;display:none}
+  .pbar.show{display:block}
+  .pbar i{display:block;height:100%;width:0;border-radius:8px;
+          background:linear-gradient(90deg,#f0a03c,#ffc06a);transition:width .22s ease-out}
+  .pmeta{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:11px;
+         color:var(--dim2);font-variant-numeric:tabular-nums;min-height:14px}
+  .pmeta b{color:var(--amber);font-weight:600}
+  .pbtn.amber{background:linear-gradient(180deg,#ffc06a,#f0a03c);border-color:#ffcf8a;color:#241503;
+              box-shadow:0 6px 18px rgba(255,180,84,.26)}
+  .pbtn[disabled]{opacity:.45;pointer-events:none}
+  .otaerr{font-size:11.5px;color:#e8734a;margin-top:7px;line-height:1.6;display:none}
+  .otaerr.show{display:block}
+
+  /* ================= 使用手册（全屏浮层） ================= */
+  .sheet{position:fixed;inset:0;z-index:30;display:none;flex-direction:column;
+         background:var(--bg);max-width:560px;margin:0 auto}
+  .sheet.show{display:flex;animation:slin .22s ease-out}
+  @keyframes slin{from{opacity:0;transform:translateY(22px)}to{opacity:1;transform:none}}
+  .shead{display:flex;align-items:center;gap:10px;padding:14px 14px 12px;
+         border-bottom:1px solid var(--line);flex:0 0 auto}
+  .shead h2{margin:0;font-size:16px;font-weight:650;flex:1}
+  .shead .sub{font-size:11px;color:var(--dim2);font-weight:400;margin-left:6px}
+  .sbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;
+         padding:12px 14px calc(22px + env(safe-area-inset-bottom))}
+  .sec{background:var(--card);border:1px solid var(--line);border-radius:12px;
+       margin-bottom:9px;overflow:hidden}
+  .sec>summary{list-style:none;cursor:pointer;padding:13px 14px;font-size:14px;font-weight:650;
+               display:flex;align-items:center;gap:9px;color:#e4e4ea}
+  .sec>summary::-webkit-details-marker{display:none}
+  .sec>summary::marker{display:none}
+  .sec>summary::after{content:"";margin-left:auto;width:7px;height:7px;flex:0 0 auto;
+                      border-right:2px solid var(--dim2);border-bottom:2px solid var(--dim2);
+                      transform:rotate(-45deg) translate(-2px,-2px);transition:transform .18s}
+  .sec[open]>summary::after{transform:rotate(45deg) translate(-2px,-2px)}
+  .sec>summary .sn{width:21px;height:21px;border-radius:6px;background:#2c2214;color:var(--amber);
+                   font-size:11px;font-weight:700;display:flex;align-items:center;
+                   justify-content:center;flex:0 0 auto;font-variant-numeric:tabular-nums}
+  .sec .sc{padding:0 14px 13px;font-size:13px;line-height:1.8;color:#b6b6bf}
+  .sec .sc p{margin:0 0 9px}
+  .sec .sc p:last-child{margin-bottom:0}
+  .sec .sc b{color:#e8e8ee;font-weight:650}
+  .sec .sc em{color:var(--amber);font-style:normal;font-weight:600}
+  .sec .sc ol,.sec .sc ul{margin:0 0 9px;padding-left:19px}
+  .sec .sc li{margin-bottom:5px}
+  .sec .sc code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;
+                background:#0d0d11;border:1px solid #26262c;border-radius:5px;
+                padding:1px 5px;color:#d8b47a;white-space:nowrap}
+  .snote{font-size:11.5px;color:var(--dim2);line-height:1.8;padding:4px 4px 0}
+  body.lock{overflow:hidden}
+
   /* ================= 底部应用条（只在灯光页出现） ================= */
   .applybar{display:none;position:fixed;left:0;right:0;bottom:0;z-index:12;max-width:560px;margin:0 auto;
             background:rgba(13,13,16,.97);backdrop-filter:blur(12px);border-top:1px solid var(--line);
@@ -254,6 +329,7 @@
     <h1>幻彩灯带控制板</h1>
     <div class="m"><span>PavoLED-A3</span><span class="chip">v32.21</span></div>
   </div>
+  <button class="iconbtn" id="helpOpen" aria-label="使用手册" title="使用手册">?</button>
   <div class="live"><span class="dot"></span>在线 1</div>
 </header>
 
@@ -390,12 +466,39 @@
   </div>
 
   <div class="stack">
-    <a class="pbtn" href="#">
+    <a class="pbtn" href="#" id="otaOpen">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>
       </svg>
       固件升级（WiFi OTA）
     </a>
+    <button class="pbtn" id="helpOpen2">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.3"/><path d="M12 17.2v.01"/>
+      </svg>
+      使用手册
+    </button>
+  </div>
+
+  <!-- 固件升级：点上面的按钮展开 -->
+  <div class="card otabox" id="otabox">
+    <h2>固件升级<span>WiFi OTA</span></h2>
+    <label class="filepick" id="fwPick">
+      <input type="file" id="fwFile" accept=".bin" hidden>
+      <span id="fwLabel">选择 firmware.bin
+        <small>从 GitHub Actions 构件里下，别超过 1.5 MB</small>
+      </span>
+    </label>
+    <div class="pbar" id="pbar"><i id="pfill"></i></div>
+    <div class="pmeta"><span id="pml">未开始</span><span id="pmr"></span></div>
+    <div class="otaerr" id="otaerr"></div>
+    <div class="stack" style="margin:11px 0 0">
+      <button class="pbtn amber" id="otaGo" disabled>开始升级</button>
+    </div>
+    <div class="note">
+      升级大约 10~30 秒，<b style="color:#e8734a">期间绝对不能断电</b>。写入失败会自动回滚到旧固件，不会变砖。
+      升级完成后设备自动重启，热点会消失一两秒，需要重新连接。
+    </div>
   </div>
 
   <div class="card">
@@ -418,6 +521,98 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- ================= 使用手册 ================= -->
+<div class="sheet" id="sheet">
+  <div class="shead">
+    <h2>使用手册<span class="sub">PavoLED</span></h2>
+    <button class="iconbtn" id="helpClose" aria-label="关闭">×</button>
+  </div>
+  <div class="sbody">
+
+    <details class="sec" open>
+      <summary><span class="sn">1</span>第一次连接设备</summary>
+      <div class="sc">
+        <ol>
+          <li>给飞控通电，灯带会先亮一段<b>青绿色自检</b>，然后进入当前模式。</li>
+          <li>手机 WiFi 列表里找 <code>PavoLED-XX</code>（XX 是本机 MAC 末字节，每台不同），密码 <code>12345678</code>。</li>
+          <li>连上后一般会自动弹出控制台；没弹就用浏览器打开 <code>192.168.4.1</code>。</li>
+        </ol>
+        <p>华为 / 荣耀手机只会在通知栏弹一条「已连接，需登录」，点那条通知才会进页面；点不动就直接用浏览器开上面那个地址。</p>
+        <p>本热点<em>不联外网</em>，所有域名都会被指回 192.168.4.1。手机如果弹出「此网络无法上网，是否切换」，选<b>保持连接</b>，否则会悄悄切回移动数据、网页就打不开了。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">2</span>调灯光</summary>
+      <div class="sc">
+        <p>最上面三格是功能区：<b>灯光 / 连接 / 设备</b>。灯光页里再分五格参数：</p>
+        <ul>
+          <li><b>当前模式</b> —— 10 种，点一下就选中（还没写进灯带）。</li>
+          <li><b>亮度 / 速度</b> —— 点方块直选档位，按住轨道左右拖是无级微调。</li>
+          <li><b>颜色</b> —— 只能点选，8 个颜色，戴手套也好按。</li>
+          <li><b>灯带长度</b> —— 轨道粗调，两边的 <b>− / +</b> 一颗一颗精调，长按会连发。范围 1~128。</li>
+        </ul>
+        <p>改完点底部<b>「应用」</b>才真正写进灯带。改过没应用的格子右上角有<em>小圆点</em>，顶上「灯光」标签也会亮一个，切到别的页也看得见。此时预览条上写着「预演中」——灯带还是旧的。</p>
+        <p>几种不能调的：常亮模式不用速度；彩虹类（07~09）自己循环变色，颜色设置对它们无效。</p>
+        <p>末尾有几颗不亮不是坏了：灯带实际颗数比设置的多，多出来的不点亮而已，把「灯带长度」调大即可。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">3</span>用手机调 Betaflight（蓝牙）</summary>
+      <div class="sc">
+        <p>蓝牙广播名和热点同名（<code>PavoLED-XX</code>），不需要配对码。</p>
+        <ol>
+          <li>手机系统蓝牙里连它。</li>
+          <li>打开 Betaflight App，端口列表里选这台设备，正常调参。</li>
+        </ol>
+        <p>蓝牙是这台板子<em>透传</em>给飞控的，所以 App 里看到的参数就是飞控真实的参数。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">4</span>电脑上调参（网络 / TCP）</summary>
+      <div class="sc">
+        <p>电脑连上本热点后，Betaflight 配置器选 <b>Manual Selection</b>，地址填 <code>tcp://192.168.4.1:5761</code>。</p>
+        <p>手机网页版的 app.betaflight.com 也能用，但<b>连着本热点时打不开</b>——它要外网。做法是：先断开热点，用移动数据打开网页版，「添加到主屏幕」，之后再连热点从主屏幕图标进。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">5</span>固件升级（OTA）</summary>
+      <div class="sc">
+        <ol>
+          <li>设备页 → <b>固件升级（WiFi OTA）</b> → 选择 <code>firmware.bin</code>。</li>
+          <li>点「开始升级」，10~30 秒。期间<em>绝对不能断电</em>。</li>
+          <li>完成后设备自己重启，热点会断一下，重连即可。</li>
+        </ol>
+        <p>写入失败会自动回滚旧固件，不会变砖。文件大小要在 1.5 MB 以内，从 GitHub Actions 的构件里拿，别用源码压缩包。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">6</span>为什么热点会自己消失</summary>
+      <div class="sc">
+        <p>为了省电、也为了飞行时不给飞控添干扰：连续 <b>60 秒</b>既没有设备连接、也没有网页操作、也没有蓝牙连接，WiFi 和蓝牙就会一起关掉，只留灯带继续工作。</p>
+        <p>这是<em>一次性</em>的——关了之后不能再从网页打开，要断电重启才会恢复。所以调参时别让它闲着太久。</p>
+      </div>
+    </details>
+
+    <details class="sec">
+      <summary><span class="sn">7</span>遇到问题</summary>
+      <div class="sc">
+        <p><b>网页打不开</b> —— 先确认手机还连着这个热点（状态栏没有 WiFi 图标就是切走了）；再确认没超过 60 秒闲置。</p>
+        <p><b>灯带完全不亮</b> —— 飞控里要打开 <code>LED_STRIP</code> 功能，并把 LED 数量设对；检查灯带数据线接的是飞控 LED 输出而不是别的口。</p>
+        <p><b>只有前几颗亮</b> —— 「灯带长度」设小了，调大。</p>
+        <p><b>飞行器不动但灯带在跑</b> —— 正常，灯带逻辑独立于飞控状态。</p>
+        <p><b>电脑配置器连不上</b> —— 检查端口填的是 <code>tcp://192.168.4.1:5761</code>，不是 192.168.4.1:5761（少了 tcp:// 会被当网页地址）。</p>
+      </div>
+    </details>
+
+    <div class="snote">这份手册内置在固件里，断网也能看。版本 v32.21。</div>
+  </div>
+</div>
 
 <script>
 /* ================= 状态 ================= */
@@ -956,6 +1151,107 @@ $("dbgRow").addEventListener("click", function(){
   lb.classList.toggle("show", dbgOn);
   if(dbgOn) lb.textContent = LOGTEXT;
   if(navigator.vibrate){ try{ navigator.vibrate(6); }catch(e){} }
+});
+
+/* ================= 使用手册 ================= */
+var sheet = $("sheet");
+function openHelp(){
+  sheet.classList.add("show");
+  document.body.classList.add("lock");
+  sheet.querySelector(".sbody").scrollTop = 0;
+}
+function closeHelp(){
+  sheet.classList.remove("show");
+  document.body.classList.remove("lock");
+}
+$("helpOpen").addEventListener("click", openHelp);
+$("helpOpen2").addEventListener("click", openHelp);
+$("helpClose").addEventListener("click", closeHelp);
+
+/* ================= 固件升级（WiFi OTA） =================
+   真机上就是：POST /api/ota，multipart 字段名 fw，成功后设备自己重启。
+   这个演示没有设备，所以选中文件后用定时器跑一遍进度，走完给「已完成」。
+   ========================================================= */
+var OTA_MAX = 1.5 * 1024 * 1024;
+var otaFile = null, otaTimer = null, otaRunning = false;
+
+function fmtSize(b){
+  if(b < 1024) return b + " B";
+  if(b < 1048576) return (b / 1024).toFixed(1) + " KB";
+  return (b / 1048576).toFixed(2) + " MB";
+}
+function otaErr(msg){
+  var e = $("otaerr");
+  if(msg){ e.textContent = msg; e.classList.add("show"); }
+  else e.classList.remove("show");
+}
+
+$("otaOpen").addEventListener("click", function(e){
+  e.preventDefault();
+  var box = $("otabox");
+  var on = !box.classList.contains("show");
+  box.classList.toggle("show", on);
+  if(on) setTimeout(function(){ box.scrollIntoView({ block:"center", behavior:"smooth" }); }, 60);
+});
+
+$("fwFile").addEventListener("change", function(){
+  var f = this.files && this.files[0];
+  otaErr("");
+  if(!f) return;
+  if(!/\.bin$/i.test(f.name)){
+    otaErr("这不是 .bin 固件。请选 GitHub Actions 构件里的 firmware.bin，不是源码压缩包。");
+    return;
+  }
+  if(f.size > OTA_MAX){
+    otaErr("文件 " + fmtSize(f.size) + "，超过 1.5 MB 上限。检查是不是下错了文件。");
+    return;
+  }
+  if(f.size < 200 * 1024){
+    otaErr("文件只有 " + fmtSize(f.size) + "，可能不完整。固件正常在 800 KB 左右。");
+    return;
+  }
+  otaFile = f;
+  $("fwPick").classList.add("has");
+  $("fwLabel").innerHTML = f.name + "<small>" + fmtSize(f.size) + " · 点这里可以重选</small>";
+  $("otaGo").disabled = false;
+  $("otaGo").textContent = "开始升级";
+  $("pfill").style.width = "0%";
+  $("pbar").classList.remove("show");
+  $("pml").textContent = "准备好了";
+  $("pmr").textContent = "";
+});
+
+$("otaGo").addEventListener("click", function(){
+  if(otaRunning || !otaFile) return;
+  otaRunning = true;
+  var go = $("otaGo");
+  go.disabled = true;
+  go.textContent = "上传中…";
+  $("pbar").classList.add("show");
+  var p = 0;
+  $("pml").textContent = "正在上传";
+  $("pmr").textContent = "0%";
+
+  otaTimer = setInterval(function(){
+    p = Math.min(100, p + 1.2 + Math.random() * 2.2);
+    $("pfill").style.width = p.toFixed(1) + "%";
+    $("pmr").textContent = Math.round(p) + "%";
+    if(p >= 100){
+      clearInterval(otaTimer);
+      otaTimer = null;
+      otaRunning = false;
+      $("pml").innerHTML = "写入完成，<b>设备重启中…</b>";
+      $("pmr").textContent = "100%";
+      go.textContent = "已完成";
+      go.disabled = true;
+      toast("升级完成，设备正在重启");
+      if(navigator.vibrate){ try{ navigator.vibrate([12,60,12,60,12]); }catch(e){} }
+      setTimeout(function(){
+        $("pml").textContent = "重启后热点会消失几秒，请重新连接";
+        $("pmr").textContent = "";
+      }, 2200);
+    }
+  }, 110);
 });
 
 /* ================= 初始化 ================= */

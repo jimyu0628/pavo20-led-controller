@@ -33,7 +33,7 @@ input[type=file]{margin:8px 0;font-size:14px;color:#ccc}
 </div>
 <div class="card warn">
  升级期间不要断电；失败会自动回滚旧固件（不会变砖）。<br>
- 完成后设备自动重启，重新连接热点 <b>RGBled</b> 即可。
+ 完成后设备自动重启，重新连接本机热点即可。
 </div>
 <script>
 function up(){
