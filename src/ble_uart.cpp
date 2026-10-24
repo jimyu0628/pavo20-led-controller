@@ -85,6 +85,7 @@
 #include "os/os_mbuf.h"
 #include "esp_log.h"
 #include "msp_tcp.h"   // v32.10：同一条 UART1 同时挂 BLE 与 TCP 两个出口
+#include "device_name.h"  // v32.18：BLE 广播名与 WiFi SSID 同源
 #include <string.h>
 #include <stdio.h>
 #include "freertos/FreeRTOS.h"
@@ -407,7 +408,7 @@ static void subWatchTask(void* arg) {
 static void adv_start(void) {
     struct ble_gap_adv_params adv = {0};
     struct ble_hs_adv_fields f = {0};
-    const char* devName = "PavoLED";
+    const char* devName = DEV_NAME; // v32.18：与 WiFi SSID 同源，改名字只改 device_name.h
     // v32.11：主包放 FFE0 + ABF0（Betaflight App 的 CC2541 / SpeedyBee V2 两个 profile
     // 的服务 UUID，扫到任意一个都能匹配；acceptAllDevices 的 App 不看这个也不影响）。
     // 主包：flags(3) + FFE0(4) + ABF0(4) + 名字(9) = 20 字节；NUS 128-bit 放扫描响应。
@@ -436,7 +437,7 @@ static void adv_start(void) {
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv, gap_event, NULL);
     if (rc != 0) { printf("[BLE] adv start err %d\n", rc); s_advOk = 0; return; }
     s_advOk = 1;
-    printf("[BLE] 广播已启动：PavoLED（adv=FFE0/FFF0，rsp=NUS）\n");
+    printf("[BLE] 广播已启动：%s（adv=FFE0/FFF0，rsp=NUS）\n", DEV_NAME);
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg) {
@@ -569,7 +570,7 @@ void bleUartInit(void) {
         return;
     }
     ble_att_set_preferred_mtu(NUS_MTU_WANT); // 主动要 247，避免默认 23 把 MSP 帧切碎
-    ble_svc_gap_device_name_set("PavoLED");
+    ble_svc_gap_device_name_set(DEV_NAME); // v32.18：与 WiFi SSID 同源
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_gatts_count_cfg(gatt_svcs);

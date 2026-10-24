@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "ota.h"
 #include "ble_uart.h"
+#include "device_name.h"   // DEV_NAME：热点 SSID 与 BLE 名同源
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -26,7 +27,7 @@
 // 备注：关闭后需重启设备才能重新开启热点
 // ============================================================
 
-#define WIFI_SSID       "RGBled-32"   // v32.15：临时换名，让手机当成「全新网络」重新做联网探测（见下）
+#define WIFI_SSID       DEV_NAME      // v32.18：与 BLE 广播名同源（device_name.h），不再各写各的
 #define WIFI_PASS       "12345678"
 #define WIFI_CHANNEL    1
 #define WIFI_MAX_CONN   4
@@ -201,10 +202,15 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     style="display:block;text-align:center;padding:16px 12px;background:#2d7ff9;color:#fff;border-radius:12px;font-size:18px;font-weight:700;text-decoration:none;box-shadow:0 4px 10px rgba(45,127,249,.35)">
   打开 Betaflight 调参 &rarr;
  </a>
- <div style="font-size:12px;color:#555;margin-top:8px;line-height:1.7">
-  ① 首次使用请先在有网时打开一次，并在地址栏右侧点「安装」装成应用，之后连着本热点也能离线用；<br>
-  ② 蓝牙方式：系统蓝牙里连 <b>PavoLED</b>，再到页面里选蓝牙设备；<br>
-  ③ 电脑装桌面版的话，端口选 <code>Manual Selection</code>，填 <code>tcp://192.168.4.1</code>。
+ <div style="font-size:12px;color:#8a3a00;background:#fff4e5;border-left:3px solid #e08c1a;padding:8px 10px;margin-top:10px;line-height:1.75">
+  <b>连着本热点时，上面这个按钮打不开。</b>本热点不联外网，DNS 会把所有域名都指回 192.168.4.1，
+  点下去只会拿到一个错误页。只有手机<b>事先</b>把 Betaflight 装成 App 才能离线打开——
+  <br>装法：<b>先断开本热点</b>，用移动数据打开 <code>app.betaflight.com</code>，浏览器菜单里「添加到主屏幕」，之后连着本热点也能开。
+ </div>
+ <div style="font-size:12px;color:#555;margin-top:10px;line-height:1.75">
+  ① <b>蓝牙（推荐，不依赖联网，飞场上最稳）</b>：系统蓝牙里连与本热点<b>同名</b>的设备，再在 Betaflight App 里选它；<br>
+  ② <b>电脑桌面版</b>：端口选 <code>Manual Selection</code>，填 <code>tcp://192.168.4.1</code>（走本热点 TCP 5761）；<br>
+  ③ 手机网页版调参：按上面橙色框里的办法装成 App，或干脆用蓝牙。
  </div>
 </div>
 <div class="sub">WiFi 密码 12345678 · 有人连着就不会自动关闭</div>
