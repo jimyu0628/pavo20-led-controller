@@ -371,10 +371,17 @@ static void dnsTask(void* arg) {
 }
 
 // ========== Captive Portal：HTTP 重定向（探测路径 → 设置页首页） ==========
+// v32.16：自己发 404，不能调 httpd_resp_send_404()——那会再进我们注册的 404 错误
+// 处理器，处理器又调回来，死循环爆栈。
+static esp_err_t sendPlain404(httpd_req_t* req) {
+    httpd_resp_set_status(req, "404 Not Found");
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_sendstr(req, "not found");
+}
+
 static esp_err_t handler_captive(httpd_req_t* req) {
     if (strncmp(req->uri, "/api/", 5) == 0) { // 不劫持 API，避免干扰网页轮询
-        httpd_resp_send_404(req);
-        return ESP_OK;
+        return sendPlain404(req);
     }
     touchHttp();
     // v32.14：把探测请求打印出来——自动弹窗不生效时，先看清手机的探测到底打到哪条路径
@@ -399,6 +406,14 @@ static esp_err_t handler_captive(httpd_req_t* req) {
         "<p>正在进入灯带控制板…</p><p><a href=\"http://192.168.4.1/\">点这里</a></p>"
         "</body></html>");
     return ESP_OK;
+}
+
+// v32.16：兜底——POST/HEAD 探测、或任何没被通配接住的 URI，统一走错误处理器重定向。
+// 手机探测用 GET 居多，但个别 ROM 会发 POST CFNetwork 探测，405 也要转成 302。
+static esp_err_t handler_captive_err(httpd_req_t* req, httpd_err_code_t err) {
+    (void)err;
+    if (strncmp(req->uri, "/api/", 5) == 0) return sendPlain404(req); // 防 err→handler→err 递归
+    return handler_captive(req);
 }
 
 // ---------- 关闭全部（httpd + wifi） ----------
@@ -469,8 +484,16 @@ void wifiCfgInit() {
     s_lastHttpUs = s_startUs;
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 10; // 5 现有 + 2 OTA + 余量
+    hc.max_uri_handlers = 12; // 6 现有 + 2 OTA + 余量
     hc.stack_size = 4096;     // OTA handler 大缓冲均为 static，不占任务栈（省内存给 BLE）
+    // ===== v32.16 关键修复 =====
+    // HTTPD_DEFAULT_CONFIG() 里 uri_match_fn 是 NULL，此时 httpd 内部走的是
+    //   hd->config.uri_match_fn ? ... : httpd_uri_match_simple(...)
+    // 也就是**精确字符串比较**，不是通配符匹配！所以我们注册的 "/*" 只能匹配
+    // 字面量 "/*"，手机探测的 /generate_204、/hotspot-detect.html 全部 404
+    // （实测日志铁证：httpd_uri: URI '/generate_204' not found）。
+    // 必须显式装上通配符匹配函数，captive portal 才真正生效。
+    hc.uri_match_fn = httpd_uri_match_wildcard;
     if (httpd_start(&s_httpd, &hc) == ESP_OK) {
         static const httpd_uri_t u_root  = {.uri="/",          .method=HTTP_GET, .handler=handler_root,  .user_ctx=NULL};
         static const httpd_uri_t u_state = {.uri="/api/state", .method=HTTP_GET, .handler=handler_state, .user_ctx=NULL};
@@ -483,9 +506,15 @@ void wifiCfgInit() {
         httpd_register_uri_handler(s_httpd, &u_set);
         httpd_register_uri_handler(s_httpd, &u_off);
         httpd_register_uri_handler(s_httpd, &u_rb);
-        httpd_register_uri_handler(s_httpd, &u_capt); // 通配放最后：精确路由优先
         otaHttpdRegister(s_httpd);                    // /ota 上传页 + /api/ota
-        printf("[WiFi] 热点 RGBled 已开启（密码 12345678），5 分钟无连接自动关闭\n");
+        // 通配必须最后注册：httpd 按注册顺序线性匹配，先注册的精确路由优先；
+        // 若通配在前，/ota 页面会被它抢走并 302 回首页。
+        httpd_register_uri_handler(s_httpd, &u_capt);
+        // 兜底：404/405 都交给 captive 处理器（POST/HEAD 探测也能被重定向）
+        httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, handler_captive_err);
+        httpd_register_err_handler(s_httpd, HTTPD_405_METHOD_NOT_ALLOWED, handler_captive_err);
+        printf("[WiFi] 热点 %s 已开启，有人在线不自动关；全部断开后 30 分钟无访问才关\n", WIFI_SSID);
+        printf("[CP] 通配路由已启用（uri_match_fn=wildcard），探测请求一律 302 → http://192.168.4.1/\n");
     } else {
         printf("[WiFi] httpd FAILED\n");
         s_httpd = NULL;
