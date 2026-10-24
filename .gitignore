@@ -3,6 +3,10 @@
 .pioenvs/
 .piolibdeps/
 build.log
+# PlatformIO 的 espidf 构建器会自动生成这两个 CMake 文件，不能入库
+# （入库后 CI 会改用仓库里这份，project() 名带中文 + glob 方式不同，直接编译失败）
+/CMakeLists.txt
+/src/CMakeLists.txt
 
 # 固件构件
 *.bin
