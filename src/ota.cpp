@@ -6,7 +6,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static const char* OTA_VER = "v32.14"; // 版本号唯一来源；小版本号区分每次修正
+static const char* OTA_VER = "v32.15"; // 版本号唯一来源；小版本号区分每次修正
 
 const char* otaVersion() { return OTA_VER; }
 

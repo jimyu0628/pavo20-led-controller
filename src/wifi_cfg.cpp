@@ -26,7 +26,7 @@
 // 备注：关闭后需重启设备才能重新开启热点
 // ============================================================
 
-#define WIFI_SSID       "RGBled"
+#define WIFI_SSID       "RGBled-32"   // v32.15：临时换名，让手机当成「全新网络」重新做联网探测（见下）
 #define WIFI_PASS       "12345678"
 #define WIFI_CHANNEL    1
 #define WIFI_MAX_CONN   4
@@ -46,6 +46,7 @@ static volatile bool  s_everConnected = false; // 是否曾有手机连上（连
 static volatile bool  s_offRequested = false;  // 网页请求关闭
 static volatile bool  s_stopping = false;
 static volatile int   s_staCount = 0;       // v32.14：当前连在热点上的设备数（每秒刷新）
+static volatile uint32_t s_dnsQ = 0;        // v32.15：累计收到的 DNS 查询数（排查劫持是否真被用到）
 static uint64_t s_startUs = 0;   // AP 开启时刻（µs）
 static volatile uint64_t s_lastHttpUs = 0; // 最后 HTTP 请求时刻（µs）
 static char s_cfgStr[64];                  // 启动时缓存 "SSID/IP" 供心跳显示（SSID 最长 32 + IP 15 + 前缀后缀，64 防截断警告）
@@ -60,6 +61,23 @@ static void wifiEvt(void* arg, esp_event_base_t base, int32_t id, void* data) {
         s_everConnected = true;
         printf("[WiFi] 手机已连接（进入保持期）\n");
     }
+}
+
+// v32.15：强制把软 AP 的 DHCP option 6（DNS）设成本机 192.168.4.1。
+// 这是 captive portal 最容易翻车的一环：如果手机拿到的 DNS 是外部地址，
+// 它就直接向外解析域名，永远不会来敲我们的 53 端口 —— 表现就是
+// 「心跳 dns:1（劫持在跑）、但手机既不弹窗也打不开页面、[CP] 一条日志都没有」。
+static esp_err_t forceDnsToSelf(esp_netif_t* apn) {
+    if (!apn) return ESP_FAIL;
+    esp_netif_ip_info_t ip = {};
+    esp_err_t e = esp_netif_get_ip_info(apn, &ip);
+    if (e != ESP_OK) return e;
+    esp_netif_dhcps_stop(apn);   // 改 option 前必须先停 dhcps，否则返回 INVALID_STATE
+    esp_ip4_addr_t dns = ip.ip;
+    e = esp_netif_dhcps_option(apn, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER,
+                               &dns, sizeof(dns));
+    esp_netif_dhcps_start(apn);
+    return e;
 }
 
 // v32.14：查询当前连在热点上的设备数（>0 = 手机在线，绝不自动关热点）
@@ -206,7 +224,6 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 
 <div class="card">
  <button id="btnOff" class="danger" onclick="offWifi()">关闭 WiFi（需重启才能重新开启）</button>
- <button style="background:#1f3a52;border-color:#36c;margin-top:8px" onclick="rebootDev()">重启设备（RESET 键失效时用这个）</button>
 </div>
 <div class="card">
  <button style="background:#1f3a52;border-color:#36c" onclick="location.href='/ota'">固件升级（WiFi OTA）</button>
@@ -248,8 +265,6 @@ function setCount(){var n=parseInt(document.getElementById("cnt").value,10);
 function setCountV(n){document.getElementById("cnt").value=n;set("count",n);}
 function offWifi(){if(confirm("确定关闭 WiFi？关闭后需重启设备才能重新开启。")){
  fetch("/api/wifi/off").then(function(){toast("WiFi 已关闭");setTimeout(function(){document.getElementById("btnOff").disabled=true;},300);});}}
-function rebootDev(){if(confirm("确定重启设备？重启期间热点会断开，约 3 秒后恢复。")){
- toast("正在重启…");fetch("/api/reboot").catch(function(){});}}
 function toast(t){var d=document.getElementById("toast");d.textContent=t;d.style.display="block";setTimeout(function(){d.style.display="none";},2500);}
 function toggleDbg(){var d=document.getElementById("dbg");
  if(document.getElementById("dbgChk").checked){d.style.display="block";dbgRefresh();}else d.style.display="none";}
@@ -311,6 +326,7 @@ static void dnsTask(void* arg) {
         socklen_t fl = sizeof(from);
         int n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr*)&from, &fl);
         if (n < 12) continue;
+        s_dnsQ++;                                     // v32.15：统计收到的 DNS 查询数（q=）
         // v32.12：按 QTYPE 分开应答——A 查询给 192.168.4.1，AAAA/其它回空(NOERROR)。
         // 原来不分类型一律塞 A 记录，手机解析 AAAA 时对不上，网络探测反而失败。
         int pos = 12;
@@ -411,6 +427,11 @@ void wifiCfgInit() {
     esp_err_t e5 = esp_wifi_set_mode(WIFI_MODE_AP);
     esp_err_t e6 = esp_wifi_set_config(WIFI_IF_AP, &wc);
     esp_err_t e7 = esp_wifi_start();
+    // v32.15：AP 起来后立刻把 DHCP 下发的 DNS 改成热点自己（详见 forceDnsToSelf 注释）
+    {
+        esp_err_t ed = forceDnsToSelf(apn);
+        printf("[WiFi] 强制 DHCP DNS=192.168.4.1：%s (0x%x)\n", ed == ESP_OK ? "ok" : "FAIL", ed);
+    }
 
     wifi_config_t cur = {};
     esp_err_t e8 = esp_wifi_get_config(WIFI_IF_AP, &cur);
@@ -512,9 +533,9 @@ void wifiCfgPoll(uint32_t nowMs) {
 
 // v32.14：热点诊断串 "sta=N off=Ms"（off<0 表示有人在线、不会自动关；单为秒）
 const char* wifiCfgDiag() {
-    static char d[40];
+    static char d[56];
     if (!s_wifiUp) {
-        snprintf(d, sizeof(d), "sta=0 off=-");
+        snprintf(d, sizeof(d), "sta=0 off=- dq=%u", (unsigned)s_dnsQ);
         return d;
     }
     int n = s_staCount;
@@ -526,6 +547,6 @@ const char* wifiCfgDiag() {
                                          : (nowUs - s_startUs) / 1000;
         left = (used >= limit) ? 0 : (int)((limit - used) / 1000);
     }
-    snprintf(d, sizeof(d), "sta=%d off=%d", n, left);
+    snprintf(d, sizeof(d), "sta=%d off=%d dq=%u", n, left, (unsigned)s_dnsQ);
     return d;
 }
