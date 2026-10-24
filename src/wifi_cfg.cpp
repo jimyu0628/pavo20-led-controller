@@ -19,6 +19,7 @@
 #include "web_page.h"     // v32.21：内嵌网页（A+ 三功能区界面）
 #include "config.h"        // STRIP_MAX_LEDS（网页里「灯带长度」的上限）
 #include "fc_input.h"      // 网页调试区显示飞控帧计数
+#include "msp_tcp.h"       // v32.21：mspTcpDiag()，「连接」页显示飞控链路状态
 
 // ============================================================
 // WiFi 热点 + Web 设置（AP 模式，ESP32-C3）
@@ -261,7 +262,7 @@ static void dnsTask(void* arg) {
             continue;
         }
         if (n < 12) continue;
-        s_dnsQ++;                                     // v32.15：统计收到的 DNS 查询数（q=）
+        s_dnsQ = s_dnsQ + 1;                          // v32.15：统计 DNS 查询数（volatile 用 ++ 会告警）
         // v32.12：按 QTYPE 分开应答——A 查询给 192.168.4.1，AAAA/其它回空(NOERROR)。
         // 原来不分类型一律塞 A 记录，手机解析 AAAA 时对不上，网络探测反而失败。
         int pos = 12;
