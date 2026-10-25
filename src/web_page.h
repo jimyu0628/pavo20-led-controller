@@ -102,6 +102,8 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   .tab .tv{font-size:13.5px;font-weight:700;line-height:1.15;color:#d9d9e2;
            font-variant-numeric:tabular-nums;white-space:nowrap;
            max-width:100%;overflow:hidden;text-overflow:ellipsis;padding:0 1px}
+  /* 模式名较长（Betaflight）时缩一点字号，避免被省略号截成「Betaflig…」 */
+  .tab .tv.sm{font-size:10.5px;letter-spacing:-.3px}
   .tab.on{background:var(--amber-d);border-color:#8a6320;
           box-shadow:inset 0 0 0 1px rgba(255,180,84,.18)}
   .tab.on .tk{color:#c9974a}
@@ -138,6 +140,13 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   .kv .v.ok{color:var(--green)}
   .kv .v.amber{color:var(--amber)}
   .kv .v.mono{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;font-weight:500}
+  /* v32.23：飞控灯色字节顺序 —— 点一下换一个的小药丸按钮 */
+  .ordbtn{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;font-weight:700;
+          letter-spacing:.5px;color:var(--amber);background:var(--amber-d);
+          border:1px solid #8a6320;border-radius:999px;padding:3px 11px;cursor:pointer;
+          -webkit-tap-highlight-color:transparent}
+  .ordbtn:active{transform:scale(.96)}
+  .ordbtn:disabled{opacity:.5;color:var(--dim2);background:var(--card2);border-color:var(--line)}
   .prog{height:4px;background:#2b2b33;border-radius:4px;overflow:hidden;margin:9px 0 2px}
   .prog i{display:block;height:100%;width:0;background:var(--amber);border-radius:4px;
           transition:width .9s linear}
@@ -447,12 +456,14 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>飞控链路<span>UART1</span></h2>
+    <h2>Betaflight 链路<span>UART1</span></h2>
     <div class="kv"><span class="k">波特率</span><span class="v">115200</span></div>
-    <div class="kv"><span class="k">飞控 LED 帧</span><span class="v" id="fcFrames">—</span></div>
+    <div class="kv"><span class="k">LED 数据帧</span><span class="v" id="fcFrames">—</span></div>
+    <div class="kv"><span class="k">灯色字节顺序</span><span class="v"><button class="ordbtn" id="fcOrder" type="button">—</button></span></div>
     <div class="kv"><span class="k">网络调参端口</span><span class="v mono" id="mspUrl">tcp://192.168.4.1:5761</span></div>
     <div class="kv"><span class="k">TCP 客户端</span><span class="v mono" id="mspState">—</span></div>
     <div class="note">电脑端 Betaflight 配置器选 <b>Manual Selection</b>，填 <b>tcp://192.168.4.1:5761</b>。</div>
+    <div class="note">灯色不对（设成<b>红</b>显示成<b>绿</b>、设成<b>蓝</b>显示成<b>红</b>）就点一下上面的顺序按钮换下一个，换到红的就是红的为止 —— 会自动记住，不用重启。</div>
   </div>
 
   <div class="stack">
@@ -621,6 +632,8 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
         <p><b>灯带完全不亮</b> —— 亮度是不是拖到 0 了、颜色是不是选了「关」；再看飞控里有没有打开 <code>LED_STRIP</code> 功能。</p>
         <p><b>只有前几颗亮</b> —— 「灯带长度」设小了，调大。</p>
         <p><b>飞行器不动但灯带在跑</b> —— 正常，灯带逻辑独立于飞控状态。</p>
+        <p><b>Betaflight 模式颜色不对</b> —— 设成红显示成绿、设成蓝显示成红，就是灯色字节顺序跟飞控不一致：到「连接」页，点一下<b>灯色字节顺序</b>那个小药丸，换一个再看，换到红的就是红的为止（会自动记住，不用重启）。</p>
+        <p><b>切到灯效模式灯却没变</b> —— 只有「Betaflight」模式才由飞控接管灯带；其余模式彻底本地渲染。若切了完全没反应，先看「连接」页的 LED 帧数是不是在涨。</p>
         <p><b>电脑配置器连不上</b> —— 检查端口填的是 <code>tcp://192.168.4.1:5761</code>，不是 192.168.4.1:5761（少了 tcp:// 会被当网页地址）。</p>
         <p><b>设备重启 / 看日志</b> —— 本页不提供重启按钮（防止误触），断电重新上电即可。</p>
       </div>
@@ -632,7 +645,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 
 <script>
 /* ================= 固件侧的常量与状态 ================= */
-var MODES = ["飞控同步","常亮","呼吸","跑马","双边跑马","导向","增长","彩虹呼吸","彩虹渐变","双边彩虹"];
+var MODES = ["Betaflight","常亮","呼吸","跑马","双边跑马","导向","增长","彩虹呼吸","彩虹渐变","双边彩虹"];
 
 /* 顺序必须与 effects.cpp 的 COLORS[] 一致：白红黄蓝绿青品红、关闭 */
 var COLORS = [
@@ -652,7 +665,7 @@ var COUNT_MAX = 128;
 
 /* base = 灯带上正在跑的那套；st = 界面里正在改的那套 */
 var base = {mode:1, color:0, spd:55, bright:50, count:55};
-var st   = {mode:1, color:0, spd:55, bright:50, count:55};
+var st   = {mode:1, color:0, spd:55, bright:50, count:55, ford:3, fordn:"RBG"};
 var dev  = null;      // 最近一次 /api/state 的原始 JSON
 var MAXC = COUNT_MAX;
 
@@ -947,7 +960,10 @@ function syncAll(){
     t = TABS[i];
     var el = tabEls[t.k];
     if(!el) continue;
-    el.querySelector(".tv").textContent = tabVal(t.k);
+    var tvEl = el.querySelector(".tv");
+    var tvTxt = tabVal(t.k);
+    tvEl.textContent = tvTxt;
+    tvEl.classList.toggle("sm", tvTxt.length > 4);   // 「Betaflight」这种长名字缩字号
     el.classList.toggle("on", t.k === curTab);
     el.classList.toggle("dirty", isDirty(t.k));
   }
@@ -1038,6 +1054,48 @@ function doApply(){
   req.send(body);
 }
 
+/* ================= 飞控灯色字节顺序（v32.23） ================= */
+/* 板上 WS2812 常见 GRB，但飞控侧（ledstrip_grb_rgb 设置 / LED 芯片批次）可能不同，
+   顺序错就表现为「设红显示绿、设蓝显示红」。这里点一下换下一个，设备立即按新顺序
+   还原、并写进 NVS（断电不忘），不用重新刷固件。 */
+var ORDER_NAMES = ["GRB","RGB","BRG","RBG","GBR","BGR"];
+function cycleFcOrder(){
+  var btn = $("fcOrder");
+  if(btn.disabled) return;
+  var next = ((st.ford|0) + 1) % 6;
+  btn.disabled = true;
+  btn.textContent = "…";
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 6000;
+  req.onload = function(){
+    btn.disabled = false;
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.ford === "number"){
+      st.ford  = j.ford;
+      st.fordn = j.fordn || ORDER_NAMES[j.ford] || "";
+      renderFcOrder();
+      toast("灯色顺序 " + st.fordn);
+    }else{
+      renderFcOrder();
+      toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    btn.disabled = false;
+    renderFcOrder();
+    toast("上传失败：确认手机还连着本热点");
+  };
+  req.send("ford=" + next);
+}
+function renderFcOrder(){
+  var b = $("fcOrder");
+  if(!b) return;
+  b.textContent = (st.fordn || ORDER_NAMES[st.ford|0] || "—") + " ⇄";
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1058,7 +1116,13 @@ function absorb(j){
   base = {mode:j.mode, color:j.color, spd:j.spd, bright:j.bright, count:j.count};
   /* 没有待应用改动时，界面跟着设备走；有改动就保留用户正在改的值 */
   if(!wasDirty){
-    st = {mode:base.mode, color:base.color, spd:base.spd, bright:base.bright, count:base.count};
+    st = {mode:base.mode, color:base.color, spd:base.spd, bright:base.bright,
+          count:base.count, ford:st.ford, fordn:st.fordn};
+  }
+  /* 灯色顺序不属于「待应用」的 5 项，单独跟设备同步 */
+  if(typeof j.ford === "number"){
+    st.ford  = j.ford;
+    st.fordn = j.fordn || "";
   }
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
@@ -1093,7 +1157,10 @@ function renderDev(j){
   $("bState").textContent = bl.t;
   $("bState").className = "v" + (bl.c ? " " + bl.c : "");
   $("bDiag").textContent = j.bdiag || "—";
-  $("fcFrames").textContent = (typeof j.fc === "number") ? (j.fc + " 帧") : "—";
+  $("fcFrames").textContent = (typeof j.fc === "number")
+      ? (j.fc + " 帧" + (typeof j.lend === "number" && j.lend ? " · 末帧 " + j.lend + " 颗" : ""))
+      : "—";
+  renderFcOrder();
   $("mspUrl").textContent   = "tcp://" + (j.ip || "192.168.4.1") + ":5761";
   $("mspState").textContent = j.msp || "—";
 
@@ -1125,7 +1192,8 @@ function renderDev(j){
             "[BLE ] " + (j.ble||"?") + "\n" +
             "[BLE ] " + (j.bdiag||"?") + "\n" +
             "[MSP ] " + (j.msp||"?") + "\n" +
-            "[RX  ] 飞控 LED 帧 " + (j.fc|0) + "\n" +
+            "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
+                     " · 末帧 " + (j.lend|0) + " 颗\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;
 }
@@ -1478,6 +1546,7 @@ ensureCountRail();
 holdBtn($("cntMinus"), function(){ stepCount(-1); });
 holdBtn($("cntPlus"),  function(){ stepCount(+1); });
 $("applyBtn").addEventListener("click", doApply);
+$("fcOrder").addEventListener("click", cycleFcOrder);   // v32.23：灯色顺序点一下换一个
 
 selectTab("mode");
 syncAll();

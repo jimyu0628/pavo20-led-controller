@@ -129,7 +129,8 @@ static void sendState(httpd_req_t* req) {
              "{\"mode\":%d,\"color\":%d,\"spd\":%d,\"bright\":%d,\"count\":%d,\"maxc\":%d,"
              "\"cal\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"sta\":%d,\"idle\":%d,"
              "\"v\":\"%s\",\"bld\":\"%s %s\",\"up\":%lu,\"rs\":%d,"
-             "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\"}",
+             "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
+             "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -137,7 +138,8 @@ static void sendState(httpd_req_t* req) {
              otaVersion(), __DATE__, __TIME__,
              (unsigned long)(esp_timer_get_time() / 1000000), (int)esp_reset_reason(),
              bleUartState(), wifiCfgDnsOk(), (unsigned long)g_rxFrames,
-             mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo());
+             mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo(),
+             webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);
@@ -178,6 +180,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "spd",    v, sizeof(v)) == ESP_OK) webSetSpeed(atoi(v));
         if (httpd_query_key_value(q, "bright", v, sizeof(v)) == ESP_OK) webSetBright(atoi(v));
         if (httpd_query_key_value(q, "count",  v, sizeof(v)) == ESP_OK) webSetCount(atoi(v));
+        if (httpd_query_key_value(q, "ford",   v, sizeof(v)) == ESP_OK) webSetFcOrder(atoi(v));
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

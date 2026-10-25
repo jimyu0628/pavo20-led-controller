@@ -39,11 +39,37 @@
 
 // ---------- ISR 与主循环共享 ----------
 static portMUX_TYPE s_rxLock = portMUX_INITIALIZER_UNLOCKED;
-static volatile uint32_t s_swBits = 0;     // 累积 bit（GRB 高位在前）
+static volatile uint32_t s_swBits = 0;     // 累积 bit（高位在前）
 static volatile uint8_t  s_swBitCnt = 0;
-static volatile RGB      s_swLeds[FC_MAX_LEDS];
+// v32.23：ISR 只按 24bit 一组存「原始三字节」，顺序还原放到 pollFcInput 里做。
+// 这样改通道顺序不用动 ISR，也不会给 840µs 的忙等再加开销。
+static volatile uint8_t  s_swRaw[FC_MAX_LEDS][3];
 static volatile int      s_swLedCnt = 0;
 static volatile bool     s_swFrameDone = false;
+
+// ---- 通道顺序（v32.23）----
+// 每个条目是「输出 r/g/b 分别取自原始第几字节」。
+// 0=GRB 原始 (G,R,B) → r=第1字节 g=第0字节 b=第2字节
+// 3=RBG 原始 (R,B,G) → r=第0字节 g=第2字节 b=第1字节
+static const uint8_t s_orderMap[6][3] = {
+    {1, 0, 2}, // 0 GRB（WS2812 标准）
+    {0, 1, 2}, // 1 RGB
+    {2, 0, 1}, // 2 BRG
+    {0, 2, 1}, // 3 RBG
+    {1, 2, 0}, // 4 GBR
+    {2, 1, 0}, // 5 BGR
+};
+static const char* s_orderName[6] = {"GRB", "RGB", "BRG", "RBG", "GBR", "BGR"};
+// 默认 3(RBG)：实测这版飞控的流里「红 → 显示绿、蓝 → 显示红」，
+// 正好等于原始字节序是 (R,B,G)。若换飞控/换批次后颜色又不对，
+// 浏览器打开 http://192.168.4.1/api/set?ford=0..5 逐个试到正确即可（会断电记忆）。
+static volatile uint8_t s_rxOrder = 3;
+
+void fcSetRxOrder(int v) {
+    if (v >= 0 && v < 6) s_rxOrder = (uint8_t)v;
+}
+int fcRxOrder() { return (int)s_rxOrder; }
+const char* fcRxOrderName() { return s_orderName[(s_rxOrder < 6) ? s_rxOrder : 0]; }
 
 // 诊断统计
 volatile uint32_t g_rxFrames = 0;
@@ -66,9 +92,10 @@ static inline void IRAM_ATTR swPushBit(bool one) {
     if (s_swBitCnt == 24) {
         uint32_t v = s_swBits;
         if (s_swLedCnt < FC_MAX_LEDS) {
-            s_swLeds[s_swLedCnt].g = (uint8_t)(v >> 16);
-            s_swLeds[s_swLedCnt].r = (uint8_t)(v >> 8);
-            s_swLeds[s_swLedCnt].b = (uint8_t)v;
+            // 原始三字节按接收顺序存入，通道顺序在 pollFcInput 里还原
+            s_swRaw[s_swLedCnt][0] = (uint8_t)(v >> 16);
+            s_swRaw[s_swLedCnt][1] = (uint8_t)(v >> 8);
+            s_swRaw[s_swLedCnt][2] = (uint8_t)v;
             s_swLedCnt = (int)(s_swLedCnt + 1);
         }
         s_swBits = 0;
@@ -169,14 +196,15 @@ bool pollFcInput(FcFrame* out) {
     return false;
 #endif
     if (!s_swFrameDone) return false;
+    const uint8_t* m = s_orderMap[(s_rxOrder < 6) ? s_rxOrder : 0];
     portENTER_CRITICAL(&s_rxLock);
     int n = (int)s_swLedCnt;
     if (n > FC_MAX_LEDS) n = FC_MAX_LEDS;
     for (int i = 0; i < n; i++) {
-        // volatile 结构体不能整体赋值，逐字段拷贝
-        out->leds[i].g = s_swLeds[i].g;
-        out->leds[i].r = s_swLeds[i].r;
-        out->leds[i].b = s_swLeds[i].b;
+        // volatile 不能整体赋值，逐字段拷贝；m[] 决定 r/g/b 各取原始第几字节
+        out->leds[i].r = s_swRaw[i][m[0]];
+        out->leds[i].g = s_swRaw[i][m[1]];
+        out->leds[i].b = s_swRaw[i][m[2]];
     }
     s_swFrameDone = false;
     portEXIT_CRITICAL(&s_rxLock);

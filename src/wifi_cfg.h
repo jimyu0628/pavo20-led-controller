@@ -46,5 +46,7 @@ void webSetColor(int v);
 void webSetSpeed(int v);
 void webSetBright(int v);
 void webSetCount(int v); // 设置 LED 数量（1~128，断电记忆，等价按键标定）
+int  webGetFcOrder();    // v32.23：飞控 LED 字节顺序索引 0~5（0=GRB…5=BGR）
+void webSetFcOrder(int v); // v32.23：改飞控字节顺序（颜色不对时逐个试），断电记忆
 // 立即按当前设置刷新灯带（模式切换即时生效）
 void webApplyNow();

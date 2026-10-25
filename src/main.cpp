@@ -94,6 +94,8 @@ static const uint8_t BRIGHT_STEPS[BRIGHT_COUNT] = {100, 75, 50, 25};  // 长按�
 static int s_calibCount = STRIP_DEFAULT_LEDS; // 标定灯数（实际灯带长度，断电记忆）
 static bool s_calibrating = false;
 static int s_calCount = STRIP_DEFAULT_LEDS;   // 标定过程中的计数
+// v32.23：飞控侧 LED 字节顺序（0=GRB 1=RGB 2=BRG 3=RBG 4=GBR 5=BGR），断电记忆
+static int s_fcOrder = 3;
 // 灯带显示缓冲 + 实际显示长度
 static RGB s_strip[STRIP_MAX_LEDS];
 static int s_stripLen = STRIP_DEFAULT_LEDS;
@@ -134,6 +136,9 @@ static void loadPrefs() {
         s_brightPct = BRIGHT_STEPS[(oi < BRIGHT_COUNT) ? oi : 2];
     }
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
+    s_fcOrder    = nvsGetU8("ford", 3);   // v32.23：飞控字节顺序，默认 RBG
+    if (s_fcOrder < 0 || s_fcOrder > 5) s_fcOrder = 3;
+    fcSetRxOrder(s_fcOrder);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
     if (s_speedPct  < 1)   s_speedPct  = 1;
@@ -149,6 +154,7 @@ static void savePrefs() {
     nvsPutU8("spct", (uint8_t)s_speedPct);
     nvsPutU8("bpct", (uint8_t)s_brightPct);
     nvsPutU16("calib", (uint16_t)s_calibCount);
+    nvsPutU8("ford", (uint8_t)s_fcOrder);
 }
 // ---------- 显示 ----------
 static void refreshStrip() {
@@ -254,12 +260,21 @@ int webGetColor()  { return s_colorIdx; }
 int webGetSpeed()  { return s_speedPct; }   // v32.21：1~100（原来是 0/1/2 档位）
 int webGetBright() { return s_brightPct; }  // v32.21：0~100（原来是 0~3 档位）
 int webGetCalib()  { return s_calibCount; }
+int webGetFcOrder(){ return s_fcOrder; }      // v32.23：飞控字节顺序索引 0~5
 bool webIsCalibrating() { return s_calibrating; }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
 void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
 void webSetSpeed(int v)  { if (v >= 1 && v <= 100) { s_speedPct = v; savePrefs(); } }
 void webSetBright(int v) { if (v >= 0 && v <= 100) { s_brightPct = v; savePrefs(); } }
+// v32.23：飞控字节顺序。改完立刻生效，下一帧飞控数据就按新顺序还原。
+void webSetFcOrder(int v) {
+    if (v < 0 || v > 5) return;
+    s_fcOrder = v;
+    fcSetRxOrder(v);
+    savePrefs();
+    logMsg("[RX] 飞控字节顺序 = %s\n", fcRxOrderName());
+}
 
 // 网页设置 LED 数量（等价于按键标定：只记总数，红蓝按比例自动分配）
 void webSetCount(int v) {
@@ -361,14 +376,14 @@ extern "C" void app_main(void) {
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u ord=%s\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), wifiCfgDiag(), bleUartState(), otaVersion(),
                    urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag(),
                    fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                    (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
                    (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,
-                   (uint32_t)g_rxFrames, (uint32_t)g_rxLastLeds);
+                   (uint32_t)g_rxFrames, (uint32_t)g_rxLastLeds, fcRxOrderName());
             lastTxTotal = cur;
             lastUrx = urx; lastUtx = utx;
         }
