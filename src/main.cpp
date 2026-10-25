@@ -98,7 +98,9 @@ static int s_calCount = STRIP_DEFAULT_LEDS;   // 标定过程中的计数
 static RGB s_strip[STRIP_MAX_LEDS];
 static int s_stripLen = STRIP_DEFAULT_LEDS;
 // 飞控信号接管状态
-static bool s_fcActive = false;   // true=飞控信号有效，正在接管显示
+// v32.22：s_fcActive 只可能在「飞控模式(s_mode==0)」且真的收到帧时为 true。
+// 一旦切到灯效模式必须立刻清掉，否则灯效渲染（主循环第 4 步）会被永久跳过。
+static bool s_fcActive = false;   // true=飞控正在接管显示（仅飞控模式）
 static uint32_t s_lastFcMs = 0;   // 最后一次有效飞控帧时间
 // 效果帧节奏
 static uint32_t s_lastFxMs = 0;
@@ -158,7 +160,7 @@ static int currentRatio() {
     if (s_calibCount <= 64) return 2;
     return 4;
 }
-// 任意模式下有飞控帧即调用：按比例把飞控 LED 帧映射到灯带
+// 飞控模式下收到帧即调用：按比例把飞控 LED 帧映射到灯带
 static void mapFcToStrip(const FcFrame& frame) {
     int ratio = currentRatio();
     int fc = frame.count;
@@ -376,16 +378,27 @@ extern "C" void app_main(void) {
             ButtonEvent ev = pollButton();
             if (ev != BTN_NONE) handleButton(ev);
         }
-        // 2) 飞控信号轮询：任意模式下有信号即显示飞控（自动接管显示）
+        // 2) 飞控信号轮询
+        //    v32.22 修复「进过飞控模式后切不回灯效」：
+        //    原来这里是「任意模式只要收到帧就接管显示」，而飞控按 20Hz 持续推帧，
+        //    于是 s_fcActive 永远为真、主循环第 4 步的灯效渲染被整条跳过 ——
+        //    用户在网页/按键切到灯效模式，帧是切了，但灯一颗都不变（看着像不受控）。
+        //    现在只有「飞控模式(0)」才把控制权交给飞控；标定仍需帧来数灯珠。
         if (pollFcInput(&frame)) {
+            s_lastFcMs = now;          // 收到帧就刷新时间戳（标定期间也要，免得退出标定误判超时）
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();
-            } else {
+            } else if (s_mode == 0) {
                 mapFcToStrip(frame);
                 s_fcActive = true;
-                s_lastFcMs = now;
             }
+        }
+        // 2.5) 不在飞控模式（或在标定）就别占着控制权：切走的那一刻立刻交还本地渲染，
+        //      不必等 500ms 超时；顺手把帧计时回拨一拍，让灯效这一轮马上出图。
+        if (s_fcActive && (s_mode != 0 || s_calibrating)) {
+            s_fcActive = false;
+            s_lastFxMs = now - fxIntervalMs();
         }
         // 3) 飞控信号丢失：超时后释放接管，恢复当前模式显示
         if (!s_calibrating && s_fcActive &&
