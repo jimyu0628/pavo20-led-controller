@@ -4,8 +4,9 @@
 //   - 接收 Betaflight LED strip 输出的 3.3V WS2812 时序
 //   - 每颗灯 24 bit，按下面的「通道顺序」还原成 RGB
 //   - 提供轮询接口：主循环每次调用 pollFcInput() 获取最新帧
-//   - 说明：ESP32-C3 RMT RX 每通道 64 符号上限，长帧续接不可靠，
-//     故改用 GPIO 上升沿中断 + ISR 忙等逐 bit 测量（详见 fc_input.cpp）
+//   - 说明：ESP32-C3 RMT RX 每通道 48 符号上限、无 DMA，长帧（28 颗 = 672
+//     符号）放不下，故改用 GPIO 上升沿中断 + ISR 忙等逐 bit 测宽。
+//     v32.24 起加入位周期一致性校验、整帧校验、自适应阈值（详见 .cpp）
 // ============================================================
 
 #include <stdint.h>
@@ -21,7 +22,7 @@ struct FcFrame {
 // 初始化软件解码（在 setup 中调用一次）
 void fcInputInit();
 
-// 轮询：若有完整新帧则解码并返回 true（out 写入解码结果）
+// 轮询：若有通过校验的新帧则返回 true 并写入 out；坏帧会被丢弃并返回 false
 bool pollFcInput(FcFrame* out);
 
 // ---- v32.23：飞控一侧的通道顺序 ----
@@ -32,13 +33,24 @@ void fcSetRxOrder(int v);
 int  fcRxOrder();
 const char* fcRxOrderName();   // "GRB"/"RGB"/... 心跳日志用
 
+// v32.24：把最近一帧前 4 颗灯的字节打成十六进制（如 "FF0000 FF0000"），
+// 用来对照飞控设置排查颜色问题。buf 至少 40 字节。
+void fcRxHeadHex(char* buf, int buflen);
+
 // 诊断统计（主循环心跳打印用）
-extern volatile uint32_t g_rxFrames;   // 累计成功解码的飞控帧数
+extern volatile uint32_t g_rxFrames;   // 通过校验、已上屏的帧数
 extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数
-extern volatile uint32_t g_rxDone;     // 帧头中断次数
+extern volatile uint32_t g_rxDone;     // 帧头可信的接收次数
 extern volatile uint32_t g_rxSyms;     // 累计解码 bit 数
 extern volatile uint32_t g_rxDrop;     // 帧头不可靠丢弃帧数
-extern volatile uint32_t g_rxFrameEnd; // ISR 置"帧完成"次数
+extern volatile uint32_t g_rxFrameEnd; // 通过校验的帧数
 extern volatile uint32_t g_rxLedAtEnd; // 最近一次帧完成时的灯数
-bool fcRxOk();    // 软件解码是否初始化成功
+extern volatile uint32_t g_rxBad;      // v32.24：数据异常整帧丢弃次数
+extern volatile uint32_t g_rxSeen;     // v32.24：判帧结束总次数（含坏帧）
+extern volatile uint32_t g_rxSkip;     // v32.24：空触发次数
+extern volatile uint16_t g_rxHiMinNs;  // v32.24：最短高位（ns）
+extern volatile uint16_t g_rxHiMaxNs;  // v32.24：最长高位（ns）
+extern volatile uint16_t g_rxLoMaxNs;  // v32.24：最长低位（ns）
+extern volatile uint16_t g_rxThrNs;    // v32.24：自适应阈值（ns）
+bool fcRxOk();    // 解码是否初始化成功
 int  fcRxErr();   // 初始化失败错误码（0 = 无错误）

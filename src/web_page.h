@@ -1158,7 +1158,8 @@ function renderDev(j){
   $("bState").className = "v" + (bl.c ? " " + bl.c : "");
   $("bDiag").textContent = j.bdiag || "—";
   $("fcFrames").textContent = (typeof j.fc === "number")
-      ? (j.fc + " 帧" + (typeof j.lend === "number" && j.lend ? " · 末帧 " + j.lend + " 颗" : ""))
+      ? (j.fc + " 帧" + (typeof j.lend === "number" && j.lend ? " · 末帧 " + j.lend + " 颗" : "")
+              + (j.bad ? " · 丢弃 " + j.bad : ""))
       : "—";
   renderFcOrder();
   $("mspUrl").textContent   = "tcp://" + (j.ip || "192.168.4.1") + ":5761";
@@ -1194,6 +1195,8 @@ function renderDev(j){
             "[MSP ] " + (j.msp||"?") + "\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
                      " · 末帧 " + (j.lend|0) + " 颗\n" +
+            "[RX  ] 坏帧丢弃 " + (j.bad|0) + " · 高位 " + (j.hmin|0) + "~" + (j.hmax|0) +
+                     "ns · 阈值 " + (j.thr|0) + "ns · 最长低位 " + (j.lomax|0) + "ns\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;
 }

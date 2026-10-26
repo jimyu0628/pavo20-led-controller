@@ -364,6 +364,8 @@ extern "C" void app_main(void) {
     wifiCfgSetBootInfo(bi);
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
+    uint32_t lastRxLogMs = 0;
+    uint32_t lastSeen = 0;
     uint32_t lastTxTotal = 0;
     uint32_t lastUrx = 0, lastUtx = 0; // MSP 透传字节（每秒差值）
     FcFrame frame;
@@ -376,14 +378,23 @@ extern "C" void app_main(void) {
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s | [RX] ok=%d err=0x%x sw=%u bits=%u drop=%u end=%u@%u frames=%u last=%u ord=%s\n",
+            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s\n",
                    cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), wifiCfgDiag(), bleUartState(), otaVersion(),
-                   urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag(),
-                   fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
-                   (uint32_t)g_rxDone, (uint32_t)g_rxSyms, (uint32_t)g_rxDrop,
-                   (uint32_t)g_rxFrameEnd, (uint32_t)g_rxLedAtEnd,
-                   (uint32_t)g_rxFrames, (uint32_t)g_rxLastLeds, fcRxOrderName());
+                   urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag());
+            // v32.24：飞控解码质量单独一行（每 5 秒），便于判断「跳色」是不是解码错帧
+            if (now - lastRxLogMs >= 5000) {
+                lastRxLogMs = now;
+                char head[48];
+                fcRxHeadHex(head, sizeof(head));
+                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u skip=%u led=%u | hi=%u..%u lo=%u thr=%u ns | ord=%s head=%s\n",
+                       fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
+                       (uint32_t)g_rxFrames, (uint32_t)g_rxBad, (uint32_t)g_rxSkip,
+                       (uint32_t)g_rxLastLeds,
+                       (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
+                       (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
+                       fcRxOrderName(), head);
+            }
             lastTxTotal = cur;
             lastUrx = urx; lastUtx = utx;
         }
@@ -399,8 +410,13 @@ extern "C" void app_main(void) {
         //    于是 s_fcActive 永远为真、主循环第 4 步的灯效渲染被整条跳过 ——
         //    用户在网页/按键切到灯效模式，帧是切了，但灯一颗都不变（看着像不受控）。
         //    现在只有「飞控模式(0)」才把控制权交给飞控；标定仍需帧来数灯珠。
+        // v32.24：飞控只要还在发帧就续上「存活」时间戳（哪怕那一帧因数据异常被
+        // 整帧丢弃），否则连续几次坏帧会把「信号丢失」误判成真、把灯带灭掉。
+        if ((uint32_t)g_rxSeen != lastSeen) {
+            lastSeen = (uint32_t)g_rxSeen;
+            s_lastFcMs = now;          // 标定期间也要，免得退出标定误判超时
+        }
         if (pollFcInput(&frame)) {
-            s_lastFcMs = now;          // 收到帧就刷新时间戳（标定期间也要，免得退出标定误判超时）
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();

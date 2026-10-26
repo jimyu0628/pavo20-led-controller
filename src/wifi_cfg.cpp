@@ -130,7 +130,8 @@ static void sendState(httpd_req_t* req) {
              "\"cal\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"sta\":%d,\"idle\":%d,"
              "\"v\":\"%s\",\"bld\":\"%s %s\",\"up\":%lu,\"rs\":%d,"
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
-             "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u}",
+             "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,"
+             "\"bad\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -139,7 +140,9 @@ static void sendState(httpd_req_t* req) {
              (unsigned long)(esp_timer_get_time() / 1000000), (int)esp_reset_reason(),
              bleUartState(), wifiCfgDnsOk(), (unsigned long)g_rxFrames,
              mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo(),
-             webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd);
+             webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd,
+             (unsigned)g_rxBad, (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
+             (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);

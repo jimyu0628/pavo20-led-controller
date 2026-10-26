@@ -23,8 +23,10 @@
 // 12KB 发送符号缓冲，对 400KB SRAM 的 C3 来说可以接受。
 #define STRIP_MAX_LEDS   128   // 灯带缓冲上限（= CALIB_MAX，网页「灯带长度」跟着它）
 #define STRIP_DEFAULT_LEDS 55  // 出厂默认灯数（按你实际灯带填写，可重新标定）
-// Betaflight 侧：F411 飞控 LED 最多 32 颗（F405 可 64），取 32 上限
-#define FC_MAX_LEDS      32
+// Betaflight 侧：飞控 LED 数量上限。F411 一般 32，F405/F7 可到 64 甚至更多；
+// v32.24 从 32 提到 64：原来飞控配了 55 颗时只解前 32 颗，后半段灯带完全不跟灯。
+// 代价只有 2 组双缓冲共 384 字节。
+#define FC_MAX_LEDS      64
 // ---------- RMT 时序（WS2812，800kHz） ----------
 // ESP32-C3 的 RMT 可靠时钟源为 40MHz XTAL（不支持 80MHz 分辨率）
 // 40MHz：1 tick = 25ns；以下时序按 40MHz 换算，实际时序与 80MHz 版一致
