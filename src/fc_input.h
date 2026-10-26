@@ -59,6 +59,8 @@ extern volatile uint32_t g_rxSkip;     // 保留字段
 extern volatile uint32_t g_rxClamp;    // 高电平被拉长、强制判 0 的 bit 数
 extern volatile uint32_t g_rxFrag;     // 不足 1 颗灯的残片，丢弃次数
 extern volatile uint32_t g_rxDropBits; // v32.26：最近一帧帧头丢掉的 bit 数（= cnt%24）
+extern volatile uint32_t g_rxGhost;    // v32.28：不是帧起点的中断次数（幽灵边沿 / 线上噪声）
+extern volatile uint32_t g_rxMute;     // v32.28：因幽灵边沿刷屏而静默采集的次数
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）
 extern volatile uint16_t g_rxHiMaxNs;  // 最长高位（ns）
 extern volatile uint16_t g_rxLoMaxNs;  // 最长低位（ns）
