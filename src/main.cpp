@@ -29,8 +29,45 @@
 #include "device_name.h"  // v32.19：设备名（PavoLED + MAC 后缀），WiFi/BLE 共用
 #include "esp_ota_ops.h"
 #include "esp_system.h"   // esp_reset_reason / esp_restart
+#include "esp_attr.h"     // v32.33：RTC_NOINIT_ATTR（崩溃落点记录）
 #include "esp_wifi.h"     // v32.13：AP 发射功率限制（弱供电下保热点）
 #include "esp_task_wdt.h" // v32.29：主任务看门狗（卡死自动重启，不用拔电）
+
+// ---------- v32.33：崩溃落点记录 ----------
+// 现场「死机」只有两种：收不到飞控帧（灯全灭但 WiFi 还活着），或者整机重启
+// （BOOT 行的复位原因会变）。前者靠 RX 统计看得见，后者一直是黑盒：
+// 串口没接、网页日志随重启清空，根本不知道死在哪。ESP32 的 RTC 内存掉电才丢、
+// 软重启保留，正好用来放「最后执行到哪一步 + 已经跑了多久」。
+// 下次开机把上一次的值打出来，一眼就知道是 SPI 发送、飞控映射还是无线轮询。
+#define STAGE_MAGIC   0x5A000000u
+RTC_NOINIT_ATTR static uint32_t s_mark;    // 高 8 位 magic，低 8 位阶段号
+RTC_NOINIT_ATTR static uint32_t s_markUp;  // 打标记那一刻的运行秒数
+static uint32_t s_prevStage = 0;           // 上次（崩溃前）的阶段
+static uint32_t s_prevUpSec = 0;           // 上次崩之前跑了多少秒
+#define STAGE_UNKNOWN 0
+#define STAGE_BOOT    1
+#define STAGE_IDLE    2
+#define STAGE_EFFECT  3
+#define STAGE_FCMAP   4
+#define STAGE_LEDOUT  5
+#define STAGE_WIFI    6
+#define STAGE_BUTTON  7
+static inline void stageMark(uint32_t st) {
+    s_mark = STAGE_MAGIC | (st & 0xFFu);
+    s_markUp = (uint32_t)(esp_timer_get_time() / 1000000);
+}
+static const char* stageName(uint32_t st) {
+    switch (st) {
+        case STAGE_BOOT:   return "启动初始化";
+        case STAGE_IDLE:   return "主循环空闲";
+        case STAGE_EFFECT: return "灯效渲染";
+        case STAGE_FCMAP:  return "飞控映射";
+        case STAGE_LEDOUT: return "灯带输出";
+        case STAGE_WIFI:   return "无线轮询";
+        case STAGE_BUTTON: return "按键处理";
+        default:           return "未知";
+    }
+}
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) {
@@ -165,7 +202,9 @@ static void savePrefs() {
 }
 // ---------- 显示 ----------
 static void refreshStrip() {
+    stageMark(STAGE_LEDOUT);   // v32.33：万一崩在 SPI 发送里，重启后能看见
     showStrip(s_strip, s_stripLen);
+    stageMark(STAGE_IDLE);
 }
 // ---------- Betaflight 模式：比例映射 ----------
 static int currentRatio() {
@@ -198,15 +237,23 @@ static void mapFcToStrip(const FcFrame& frame) {
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
         if (src >= fc) { s_strip[i] = RGB(); continue; }  // 超出飞控灯数：灭
-        if (src >= have) src = have - 1;                  // 本帧偏短：尾部沿用最后一颗
+        // v32.33：本帧解出的比基准少（偶尔丢一颗）时，原来是把「最后一颗的颜色」
+        // 往后复制一大片 —— 扫描效果里那就是一条被拉长的色带，看起来像颜色断层。
+        // 改成这一段保持上一帧不变：少个把帧看不出来，拉伸出色块反而刺眼。
+        if (src >= have) continue;
         RGB c = frame.leds[src];
         // v32.31 暗切：飞控在「不亮」的区域并不是给 0，而是给一个极小的值 ——
         // 现场实测 BF 亮度 100 时暗区就是 0x08（8/255 = 3%），亮度 11 时是 0x01。
         // 本板再乘 42% 亮度后落在 1/255 附近，暗环境里就是那层「弱光」。
-        // 解码再准也消不掉它，只能在这里切掉：≤ FC_DARK_CUT 的分量一律归零。
-        if ((uint8_t)c.r <= FC_DARK_CUT) c.r = 0;
-        if ((uint8_t)c.g <= FC_DARK_CUT) c.g = 0;
-        if ((uint8_t)c.b <= FC_DARK_CUT) c.b = 0;
+        // v32.33【保色相】原来逐通道切会把颜色渐变的尾巴切歪：紫 = R+B，扫描条纹
+        // 边缘 R=15 / B=8 时 B 被切掉、R 留着 → 冒出一段纯红；另一侧正好反过来
+        // → 冒出一段纯蓝。用户看到的「亮部前后蓝红分离」有一半是它造成的
+        // （另一半是真临界位判错，已在 fc_input 里改判据）。
+        // 改成整颗判定：三通道最大值都不超过门限才整颗归零，色相永远不动。
+        uint8_t mx = c.r;
+        if (c.g > mx) mx = c.g;
+        if (c.b > mx) mx = c.b;
+        if (mx <= FC_DARK_CUT) c = RGB();
         s_strip[i] = c;
     }
     refreshStrip();
@@ -313,6 +360,7 @@ static volatile uint32_t s_lpMaxMs = 0;   // 主循环最大间隔（ms）
 static uint32_t s_txRate = 0;             // 每秒发送帧数
 static uint32_t s_fcSilentS = 0;          // 距上一帧飞控信号的秒数
 static uint32_t s_rxResetN = 0;           // 采集自愈次数
+static uint32_t s_autoRstN = 0;           // v32.33：本次开机已自动重启次数（上限 3）
 // v32.32：采集窗管理（旧版窗口可能一直开着，ISR 反复屏蔽中断把整机拖慢）
 static uint32_t s_capWinMs = 0;           // 本次开窗时刻（0=窗口没开）
 static uint32_t s_capRetryMs = 0;         // 无帧退避截止时刻
@@ -323,6 +371,10 @@ int webGetLoopGap() { return (int)s_lpMaxMs; }
 int webGetFcSilent(){ return (int)s_fcSilentS; }
 int webGetRxReset() { return (int)s_rxResetN; }
 int webGetCapDrop() { return (int)s_capWinDrop; }
+// v32.33：上一次（重启前）执行到哪一步、跑了多久。0 = 没有记录（首次上电/断电）。
+int webGetLastStage() { return (int)s_prevStage; }
+int webGetLastUp()    { return (int)s_prevUpSec; }
+const char* webStageName(int st) { return stageName((uint32_t)st); }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
 void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
@@ -372,6 +424,12 @@ void webApplyNow() {
 }
 // ---------- 主程序入口 ----------
 extern "C" void app_main(void) {
+    // v32.33：先把上一次的落点读出来（RTC 内存，软重启保留），再覆盖它
+    if ((s_mark & 0xFF000000u) == STAGE_MAGIC) {
+        s_prevStage = s_mark & 0xFFu;
+        s_prevUpSec = s_markUp;
+    }
+    stageMark(STAGE_BOOT);
     nvsInit();
     loadPrefs();
     // OTA：从备用分区启动后标记有效，防止下次重启自动回滚
@@ -429,10 +487,11 @@ extern "C" void app_main(void) {
     // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
     char bi[512];
     snprintf(bi, sizeof(bi),
-             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | 飞控色序 %s | build %s %s | 颜色 %d 速度 %d 亮度 %d%% | LED %s | 复位原因 %d",
+             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | 飞控色序 %s | build %s %s | 颜色 %d 速度 %d 亮度 %d%% | LED %s | 复位原因 %d | 上次落点 %s · 跑了 %us",
              otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode, fcRxOrderName(),
              __DATE__, __TIME__, s_colorIdx, s_speedPct, s_brightPct,
-             ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason());
+             ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason(),
+             s_prevStage ? stageName(s_prevStage) : "无记录", (unsigned)s_prevUpSec);
     wifiCfgSetBootInfo(bi);
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
@@ -450,6 +509,7 @@ extern "C" void app_main(void) {
     while (1) {
         uint32_t now = nowMs();
         esp_task_wdt_reset();
+        stageMark(STAGE_IDLE);
         // 主循环间隔：正常 = 一次 delayMs(1) ≈ 10ms（tick 100Hz）。
         // 明显大于 100ms 就是被谁阻塞了，记下来给网页看。
         {
@@ -461,6 +521,7 @@ extern "C" void app_main(void) {
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
             wifiCfgPoll(now); // 每秒：无线闲置满 60 秒就关 WiFi + 蓝牙（有人在用/有请求/蓝牙连着则续期）
+            stageMark(STAGE_IDLE);
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
@@ -539,6 +600,7 @@ extern "C" void app_main(void) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();
             } else if (s_mode == 0) {
+                stageMark(STAGE_FCMAP);
                 mapFcToStrip(frame);
                 s_fcActive = true;
             }
@@ -574,6 +636,21 @@ extern "C" void app_main(void) {
             }
         } else {
             fcLostLogMs = 0;
+        }
+        // v32.33：最后的自救 —— 「灯全灭、BF 重启无效、只有把 ESP32 断电重启才好」
+        // 这个形态说明状态坏在 ESP32 自己身上（中断/GPIO 寄存器），软件清不干净。
+        // 那就让它自己重启：条件卡得比较死，必须是「本次开机已经正常收过 200 帧
+        // 以上」并且「连续 25 秒一帧都没收到」—— 飞控压根没接时 g_rxFrames 是 0，
+        // 永远不会触发，也不会陷入重启循环。
+        if (s_mode == 0 && !s_calibrating && (uint32_t)g_rxFrames > 200 &&
+            (now - s_lastFcMs) > 25000) {
+            if (s_autoRstN < 3) {
+                s_autoRstN++;
+                logMsg("[SYS] 连续 25s 收不到飞控帧（本次开机已收 %u 帧），自动重启恢复（第 %u 次）\n",
+                       (unsigned)g_rxFrames, (unsigned)s_autoRstN);
+                delayMs(80);
+                esp_restart();
+            }
         }
         // 4) 灯效模式渲染（非标定 && 无飞控接管 && 模式 1~9，按速度决定帧间隔）
         if (!s_calibrating && !s_fcActive && s_mode != 0 &&

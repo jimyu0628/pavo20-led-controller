@@ -173,11 +173,31 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
                  border-radius:50%;background:#8a8a92;transition:left .18s,background .18s}
   .switch.on{background:#5a3f14}
   .switch.on::after{left:21px;background:var(--amber)}
-  .logbox{display:none;margin-top:9px;background:#08080b;border:1px solid #202026;border-radius:9px;
+  /* v32.33：仿 iPhone 开关（51×31，白色滑块 27px，打开=系统绿 #34c759）。
+     用在「连接」页的蓝牙广播行 —— 那一行整行可点，开关贴最右。 */
+  .switch.ios{width:51px;height:31px;border-radius:16px;background:#39393d;
+              transition:background .22s}
+  .switch.ios::after{width:27px;height:27px;top:2px;left:2px;background:#fff;
+                     box-shadow:0 2px 5px rgba(0,0,0,.38);transition:left .22s,background .22s}
+  .switch.ios.on{background:#34c759}
+  .switch.ios.on::after{left:22px;background:#fff}
+  /* 日志：开关打开后才有工具条（暂停/复制）。
+     日志每秒重写一次，手机上一滑动就被刷新，根本没法选中复制 —— 所以
+     复制前先自动暂停，再抽全部内容。 */
+  .logwrap{display:none;margin-top:9px}
+  .logwrap.show{display:block}
+  .logtools{display:flex;gap:7px;justify-content:flex-end;align-items:center;margin-bottom:7px}
+  .mini{height:28px;padding:0 12px;border-radius:8px;border:1px solid #2a2a31;
+        background:var(--card2);color:#b9b9c4;font-family:inherit;font-size:12px;
+        font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:5px;
+        -webkit-tap-highlight-color:transparent}
+  .mini svg{width:13px;height:13px;flex:0 0 auto}
+  .mini:active{transform:scale(.96)}
+  .mini.on{border-color:#8a6320;color:var(--amber);background:var(--amber-d)}
+  .logbox{margin-top:0;background:#08080b;border:1px solid #202026;border-radius:9px;
           padding:8px 10px;font-family:ui-monospace,Menlo,Consolas,monospace;
           font-size:11px;line-height:1.85;color:#7f9a8a;white-space:pre-wrap;
-          max-height:190px;overflow:auto}
-  .logbox.show{display:block}
+          max-height:220px;overflow:auto;-webkit-user-select:text;user-select:text}
 
   /* 快捷档（大目标，戴手套好点） */
   .chips{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:10px}
@@ -490,8 +510,8 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   <div class="card">
     <h2>蓝牙调参<span>与热点同名</span></h2>
     <div class="kv" id="bleRow" style="cursor:pointer">
-      <span class="k">蓝牙广播 <em style="color:var(--dim2);font-style:normal">（点此行开关）</em></span>
-      <span class="v"><span class="switch" id="bleSw"></span></span>
+      <span class="k">蓝牙广播</span>
+      <span class="v"><span class="switch ios" id="bleSw" role="switch" aria-checked="false"></span></span>
     </div>
     <div class="kv"><span class="k">广播名称</span><span class="v mono" id="bSsid">—</span></div>
     <div class="kv"><span class="k">状态</span><span class="v" id="bState">—</span></div>
@@ -584,12 +604,25 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <h2>调试信息</h2>
+    <h2>调试信息<span>可复制</span></h2>
     <div class="toggle" id="dbgRow">
       <span>显示运行日志</span>
       <span class="switch" id="dbgSw"></span>
     </div>
-    <div class="logbox" id="logbox"></div>
+    <div class="logwrap" id="logwrap">
+      <div class="logtools">
+        <button type="button" class="mini" id="logPause">暂停刷新</button>
+        <button type="button" class="mini" id="logCopy">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="11" height="11" rx="2.5"/>
+            <path d="M6.5 15H5.5A1.5 1.5 0 0 1 4 13.5v-8A1.5 1.5 0 0 1 5.5 4h8A1.5 1.5 0 0 1 15 5.5v1"/>
+          </svg>
+          复制
+        </button>
+      </div>
+      <div class="logbox" id="logbox"></div>
+    </div>
   </div>
 </section>
 
@@ -1195,6 +1228,9 @@ var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
            6:"任务看门狗",7:"看门狗",8:"深睡唤醒",9:"电压跌落",10:"SDIO",
            11:"USB",12:"JTAG",13:"EFUSE",14:"电源抖动",15:"CPU 锁死"};
+/* v32.33：崩溃落点（固件里 stageMark 打的标记），重启后仍能读出来 */
+var STAGE = {1:"启动初始化",2:"主循环空闲",3:"灯效渲染",4:"飞控映射",
+             5:"灯带输出",6:"无线轮询",7:"按键处理"};
 var upTick = 0;
 
 function absorb(j){
@@ -1285,37 +1321,58 @@ function renderDev(j){
   $("dRst").textContent  = RST[j.rs] || ("代码 " + j.rs);
 
   /* 调试日志 */
+  var lend = j.lend|0, need = j.need|0, board = j.count|0, ratio = j.ratio|0;
+  var needTxt = "";
+  if(need > 0){
+    needTxt = " · 飞控应发 " + need + " 颗（本板 " + board + " 颗 · 比例 1:" + ratio + "）";
+    if(Math.abs(lend - need) > 1){
+      needTxt += " · 对不上：差 " + Math.abs(lend - need) + " 颗" +
+                 (lend > need ? "，多出的被丢掉" : "，末端会缺色") +
+                 "（BF 里 LED 数量改成 " + need + "）";
+    }
+  }
+  var rsn = RST[j.rs] || ("代码 " + j.rs);
+  var lastSt = (j.lstg|0) > 0
+      ? " · 上次跑到「" + (STAGE[j.lstg|0] || ("#" + (j.lstg|0))) + "」时中断（已跑 " + (j.lup|0) + "s）"
+      : "";
   logText = "[固件] " + (j.v||"?") + " · build " + (j.bld||"?") + "\n" +
             "[WiFi] " + (j.ssid||"?") + " " + (j.ip||"?") + " · 在线 " + (j.sta|0) +
                      " · 空闲 " + (idle < 0 ? "在用" : idle + "s") + "\n" +
             "[DNS ] 劫持 " + (j.dns ? "ok" : "fail") + "\n" +
-            "[BLE ] " + (j.ble||"?") + "\n" +
+            "[BLE ] " + (j.ble === "ble idle"
+                         ? "ble idle · 协议栈在跑、按设置不广播（要手机调参就打开上面的开关）"
+                         : (j.ble||"?")) + "\n" +
             "[BLE ] " + (j.bdiag||"?") + "\n" +
             "[MSP ] " + (j.msp||"?") + "\n" +
             "[LED ] 发送 " + (j.tx|0) + "/s · 失败 " + (j.txf|0) +
                      " · 循环卡顿 " + (j.lpm|0) + "ms\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
                      " · 位周期 " + (j.per|0) + "ns\n" +
-            // v32.30：「解出 N 颗」= 本帧收了多少位 ÷ 24，**不是**飞控里的配置；
-            // 并排给出「飞控应发 M 颗」才看得懂 —— 两者不等就是配置不对或帧内多/少了位。
-            "[RX  ] 解出 " + (j.lend|0) + " 颗 / " + (j.bits|0) + " 位" +
-                     ((j.need|0) > 0 ? " · 飞控应发 " + (j.need|0) + " 颗（本板 " +
-                       (j.cal|0) + " 颗 · 比例 1:" + (j.ratio|0) + "）" +
-                       ((j.lend|0) > (j.need|0) ? " · 只用到前 " + (j.need|0) + " 颗" : "") : "") + "\n" +
-            "[RX  ] 错位帧 " + (j.mis|0) + " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
+            // v32.33：「解出」= 本帧收到的位数 ÷ 24，不是飞控配置；
+            // 「本板」用的是灯带长度（v32.32 这里错拿了标定状态位，永远显示 0 颗）
+            "[RX  ] 解出 " + lend + " 颗 / " + (j.bits|0) + " 位" + needTxt + "\n" +
+            "[RX  ] 帧头缺 " + (j.dropb|0) + " 位 · 断流 " + (j.gap|0) +
+                     " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
                      " · 临界位 " + (j.near|0) + "\n" +
+            "[RX  ] 存疑帧 " + (j.mis|0) + "（帧内出过断流/毛刺，那几帧颜色会错位）\n" +
             "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
-                     "ns · 最长低位 " + (j.lomax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
+                     "ns · 最长位 " + (j.gmax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
             "[RX  ] 残片 " + (j.frag|0) + " · 幽灵边沿 " + (j.ghost|0) + " · 静默 " + (j.mute|0) +
-                     " · 自愈 " + (j.rxs|0) + " · 飞控静默 " + (j.sil|0) + "s" +
+                     " · 自愈 " + (j.rxs|0) + " · 窗口超时 " + (j.capd|0) +
+                     " · 飞控静默 " + (j.sil|0) + "s" +
                      ((j.sil|0) > 1 ? "（收不到飞控信号！）" : "") + "\n" +
             "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
-            "[BOOT] " + (j.boot||"?");
-  if(dbgOn) $("logbox").textContent = logText;
+            "[BOOT] " + (j.boot||"?") + "\n" +
+            "[BOOT] 复位 " + rsn + lastSt;
+  if(dbgOn && !logPaused) $("logbox").textContent = logText;
+  if(dbgOn && !logPaused){
+    var lb0 = $("logbox");
+    lb0.scrollTop = lb0.scrollHeight;   // 跟到最新一行，省得手动拖
+  }
 }
 
 /* ================= 轮询 /api/state ================= */
-var logText = "", dbgOn = false;
+var logText = "", dbgOn = false, logPaused = false;
 function setLive(on, txt){
   $("live").classList.toggle("off", !on);
   $("liveN").textContent = txt;
@@ -1475,10 +1532,60 @@ if(bleRow) bleRow.addEventListener("click", toggleBle);
 $("dbgRow").addEventListener("click", function(){
   dbgOn = !dbgOn;
   $("dbgSw").classList.toggle("on", dbgOn);
-  var lb = $("logbox");
-  lb.classList.toggle("show", dbgOn);
-  if(dbgOn) lb.textContent = logText || "还没收到设备状态…";
+  var lw = $("logwrap");
+  lw.classList.toggle("show", dbgOn);
+  if(dbgOn) $("logbox").textContent = logText || "还没收到设备状态…";
   shake(6);
+});
+
+/* ================= 设备页：日志暂停 / 复制（v32.33） =================
+   日志每秒重写一次，手机上一滑动就被刷掉，没法选中更没法复制。
+   这里给两个按钮：暂停刷新（冻住当前内容慢慢看）、复制（抽全文到剪贴板，
+   并自动暂停 —— 复制到一半内容变了会很莫名其妙）。 */
+$("logPause").addEventListener("click", function(){
+  logPaused = !logPaused;
+  this.textContent = logPaused ? "继续刷新" : "暂停刷新";
+  this.classList.toggle("on", logPaused);
+  if(!logPaused) $("logbox").textContent = logText;
+});
+function copyText(txt, cb){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(txt).then(function(){ cb(true); },
+                                            function(){ cb(fallback()); });
+  }else{
+    cb(fallback());
+  }
+  function fallback(){
+    // 本机是 http://192.168.4.1，不属于安全上下文，navigator.clipboard 多半没有，
+    // 只能走老办法：临时 textarea + execCommand（iOS 要先 select 再 setSelectionRange）
+    var ta = document.createElement("textarea");
+    ta.value = txt;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    try{ ta.setSelectionRange(0, txt.length); }catch(e){}
+    var ok = false;
+    try{ ok = document.execCommand("copy"); }catch(e){ ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+$("logCopy").addEventListener("click", function(){
+  if(!dbgOn){
+    dbgOn = true;
+    $("dbgSw").classList.add("on");
+    $("logwrap").classList.add("show");
+    $("logbox").textContent = logText || "";
+  }
+  logPaused = true;                    // 复制期间冻住，免得边复制边变
+  var bp = $("logPause");
+  bp.textContent = "继续刷新";
+  bp.classList.add("on");
+  copyText(logText || "", function(ok){
+    toast(ok ? "日志已复制（刷新已暂停）"
+             : "复制被浏览器拦了，请长按日志框手动选择");
+  });
 });
 
 /* ================= 使用手册 ================= */

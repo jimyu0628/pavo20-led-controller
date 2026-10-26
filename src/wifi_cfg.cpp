@@ -123,8 +123,10 @@ static void touchHttp() {
 //   v/bld/up/rs —— 版本、构建时间、已运行秒数、复位原因
 //   ble/dns/fc/msp/bdiag/boot —— 调试区与「连接」页用
 static void sendState(httpd_req_t* req) {
-    // boot 字符串本身约 170 字节，加上其余字段整条 500 上下，1400 留足余量
-    char buf[1500];   // v32.32：加了 bleen/capd 两个字段，留足余量
+    // v32.33：改 static。这条串已经 800 字节上下，放在栈上要占 httpd 任务
+    // 默认 4KB 栈的 1/4，再叠 snprintf 内部开销，是「偶发重启」的可疑点之一。
+    // httpd 是单线程串行处理，static 不会有并发问题。
+    static char buf[1600];
     // v32.27：把最近一帧前 4 颗灯的「线路原始字节」也吐给网页（形如 00FF00 00FF00 …）。
     // 飞控设成纯红时：原始字节里哪个位置是 FF，就说明字节序是哪个 —— 排颜色问题时
     // 不用猜、也不用插 USB 看串口，网页日志里直接能对。
@@ -140,7 +142,8 @@ static void sendState(httpd_req_t* req) {
              "\"dropb\":%u,\"cap\":%u,\"ratio\":%d,\"need\":%d,\"bleen\":%d,\"capd\":%d,"
              // v32.29：健康诊断
              "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
-             "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u}",
+             "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u,"
+             "\"gap\":%u,\"gmax\":%u,\"lstg\":%d,\"lup\":%d}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -161,7 +164,9 @@ static void sendState(httpd_req_t* req) {
              webGetFcSilent(), webGetRxReset(),
              (unsigned)g_rxBits, (unsigned)g_rxMisalign,
              (unsigned)g_rxSpike, (unsigned)g_rxMerge,
-             (unsigned)g_rxNear, (unsigned)g_rxPeriodNs);
+             (unsigned)g_rxNear, (unsigned)g_rxPeriodNs,
+             (unsigned)g_rxGap, (unsigned)g_rxGapMaxNs,
+             webGetLastStage(), webGetLastUp());
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);

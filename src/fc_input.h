@@ -70,8 +70,14 @@ extern volatile uint32_t g_rxMute;     // v32.28：因幽灵边沿刷屏而静�
 extern volatile uint32_t g_rxSpike;    // v32.29：被丢弃的振铃毛刺（累计）
 extern volatile uint32_t g_rxMerge;    // v32.29：被合并的「切开位」（累计）
 extern volatile uint32_t g_rxNear;     // v32.29：高/低比值接近 1 的「判得勉强」的位
-extern volatile uint32_t g_rxMisalign; // v32.29：bit 数不是 24N-1 的帧数（分组错位，杂色来源）
+// v32.33【语义修正】原来统计「bit 数不是 24N-1 的帧」，结果现场 3407 帧里报了 3393 帧
+// ——因为它把「帧头必然丢 1~24 位」这件事也算成错位了。真正的错位只发生在
+// **帧中间少了位**（断流/毛刺/合并），那会让尾部对齐后前半段整体偏 24k 位。
+// 现在只在帧内真的出现异常位时才计一帧，这个数才读得懂。
+extern volatile uint32_t g_rxMisalign; // v32.33：帧内有断流/毛刺/合并的帧数（颜色可能错位）
 extern volatile uint32_t g_rxBits;     // v32.29：最近一帧的原始 bit 数
+extern volatile uint32_t g_rxGap;      // v32.33：最近一帧的「断流位」数（一位时长超过 2 个周期）
+extern volatile uint16_t g_rxGapMaxNs; // v32.33：最近一帧最长的一位时长（正常 = 位周期）
 extern volatile uint16_t g_rxPeriodNs; // v32.29：实测位周期（ns）
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）
 extern volatile uint16_t g_rxHiMaxNs;  // 最长高位（ns）

@@ -139,8 +139,10 @@ volatile uint32_t g_rxMute = 0;      // 因幽灵边沿太多而静默采集的�
 volatile uint32_t g_rxSpike = 0;     // v32.29：被丢弃的振铃毛刺（累计）
 volatile uint32_t g_rxMerge = 0;     // v32.29：被合并的「切开位」（累计）
 volatile uint32_t g_rxNear = 0;      // v32.29：判为 1 但离阈值很近的位（弱光嫌疑）
-volatile uint32_t g_rxMisalign = 0;  // v32.29：bit 数不是 24N-1 的帧（分组会错位）
+volatile uint32_t g_rxMisalign = 0;  // v32.33：帧内有断流/毛刺/合并的帧（颜色可能错位）
 volatile uint32_t g_rxBits = 0;      // v32.29：最近一帧的原始 bit 数（cnt）
+volatile uint32_t g_rxGap = 0;       // v32.33：最近一帧的断流位数
+volatile uint16_t g_rxGapMaxNs = 0;  // v32.33：最近一帧最长的一位时长
 volatile uint16_t g_rxHiMinNs = 0;
 volatile uint16_t g_rxHiMaxNs = 0;
 volatile uint16_t g_rxLoMaxNs = 0;
@@ -158,7 +160,8 @@ void fcRxSetActive(bool on) { s_active = on; }
 bool fcRxActive() { return s_active; }
 
 // ---------- 帧结束：对齐 → 发布 ----------
-static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
+static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
+                                        uint16_t nGap, uint32_t perMax, bool abnormal) {
     g_rxSeen = (uint32_t)(g_rxSeen + 1);
     uint32_t capUs = (uint32_t)((esp_cpu_get_cycle_count() - t0) * 25u / 4u / 1000u);
 
@@ -176,11 +179,14 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
     g_rxBits = (uint32_t)cnt;
     g_rxLedAtEnd = (uint32_t)(cnt / 24);
     g_rxDropBits = (uint32_t)(cnt % 24);
-    // v32.29：正常一帧 = 24N-1 位（中断进不来那么快，帧头第 1 位必然采不到）。
-    // 不是这个余数说明帧内多/少了位，24bit 分组会整体错位 —— 亮部杂色就是这么来的。
-    // 记下来但**不丢帧**（丢帧只会让画面冻住）。
-    if (g_rxDropBits != 23) g_rxMisalign = (uint32_t)(g_rxMisalign + 1);
-
+    // v32.33：帧头丢多少位（cnt%24）是**正常现象**，不是错误 —— 中断永远赶不上
+    // 帧头那一位，尾部对齐后前面少几颗由 pollFcInput 复制补回。v32.32 之前
+    // 把它当「错位帧」，现场 3407 帧报了 3393 帧，纯属吓自己。
+    // v32.33：只有「帧中间出问题」的帧才可能真的分组错位（前半段整体偏移）。
+    // 断流 / 丢弃振铃 / 合并切开位，三者任一发生就计一帧 —— 这个数才驱动判断。
+    if (abnormal) g_rxMisalign = (uint32_t)(g_rxMisalign + 1);
+    g_rxGap = (uint32_t)nGap;
+    g_rxGapMaxNs = (perMax * 25u / 4u > 0xFFFFu) ? 0xFFFFu : (uint16_t)CYC_TO_NS(perMax);
     g_rxCapUs = (uint16_t)((capUs > 0xFFFFu) ? 0xFFFFu : capUs);
     g_rxHiMinNs = (s_fHiMin > 2000) ? 0 : (uint16_t)CYC_TO_NS(s_fHiMin);
     g_rxHiMaxNs = (uint16_t)CYC_TO_NS(s_fHiMax);
@@ -196,7 +202,7 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
         }
     }
 
-    // 判别阈值（只给帧尾那一位用）：两簇均值的中点
+    // 判别阈值：两簇（0 码高位均值 / 1 码高位均值）的中点
     if (s_h0N >= 8 && s_h1N >= 8) {
         uint32_t a0 = s_h0Sum / s_h0N;
         uint32_t a1 = s_h1Sum / s_h1N;
@@ -206,6 +212,11 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
             if (t > 300) t = 300;
             s_thrCyc = s_cal ? ((s_thrCyc * 3 + t) / 4) : t;
             s_cal = 1;
+        } else {
+            // v32.33：两簇分不开 = 本帧判得很乱（阈值已经不可信）。
+            // 直接作废校准，下一帧退回「高 vs 低」重新学一遍 —— 闭环自纠，
+            // 免得一个偏掉的阈值把后续所有帧都带歪（全亮 / 全暗那种）。
+            s_cal = 0;
         }
     }
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
@@ -276,6 +287,8 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     s_pSum = 0; s_pN = 0;
     uint16_t glitch = 0;
     uint16_t nSpike = 0, nMerge = 0, nNear = 0;
+    uint16_t nGap = 0;          // v32.33：本帧断流位数
+    uint32_t perMax = 0;        // v32.33：本帧最长的一位（暴露断流）
     uint32_t pendHi = 0;        // 跨「被切开」段累计的高电平（还没成形的一位）
     uint32_t pLocal = s_periodCyc;  // 本帧的位周期跟踪（只用最近几个位，跟得上变化）
     g_rxDone = (uint32_t)(g_rxDone + 1);
@@ -321,16 +334,34 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         if (noise) {
             nSpike++; glitch = 1;
         } else {
-            // ---- 正常一位：判「这一位自己的高 与 低 谁长」----
-            // WS2812 天生占空比分明：0 码恒 400<850、1 码恒 800>450。
-            // 两边共用同一个下降沿，测宽的系统性偏差在比较中抵消；
-            // FC 的主频整体偏快偏慢也不影响（占空比不变）。
+            // ---- 正常一位：判 0 / 1 ----
+            // v32.33【判据改良 —— 治「紫色光条前后出现蓝红分离」】
+            //   现场日志：位周期只有 925ns（不是 WS2812 标准的 1250），
+            //   0 码高/低 = 225 / 700，1 码 = 643 / 282。
+            //   「高 > 低」在位周期接近 1250 时余量很大，但到 925ns 时 0 码只差
+            //   125ns —— 一有干扰就翻，翻一个位就是一颗灯的某个通道错值：
+            //   紫色（R+B）会掉一个通道变成纯蓝 / 纯红，而且相邻灯珠成片出现，
+            //   看起来就是「亮部前后蓝红分离」。日志里「临界位 219560」就是它。
+            //
+            //   改成两判据并用：
+            //     · byThr ：高位 > 自适应阈值（本帧 0 簇均值 与 1 簇均值 的中点）。
+            //               它是**统计值**，几百个位一起算出来的，单点抖动翻不动它，
+            //               而且两簇均值都出自同一套测量，系统偏差自动抵消。
+            //     · byDuty：高 > 低。标准 WS2812 判法，不需要任何先验，冷启动用它。
+            //   两者一致直接采信；不一致时信 byThr，并记一次真正的「临界位」。
             bool one;
             if (tail) {
-                // 帧尾这一位的低电平是帧间复位，不能用；退回绝对阈值
+                // 帧尾这一位的低电平是帧间复位，不能用占空比，只能看阈值
                 one = (h > s_thrCyc);
             } else {
-                one = (h > lo);
+                bool byDuty = (h > lo);
+                bool byThr  = (h > s_thrCyc);
+                if (!s_cal) {          // 还没校准：没有可信阈值，用占空比
+                    one = byDuty;
+                } else {
+                    one = byThr;
+                    if (byDuty != byThr) nNear++;   // 两判据打架 = 真临界位
+                }
             }
             if (cnt < FC_MAX_BITS) bp[cnt] = (uint8_t)one;
             cnt++;
@@ -343,10 +374,10 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
                 uint32_t per = h + lo;
                 s_pSum += per; s_pN++;
                 pLocal = (pLocal * 3u + per) / 4u;
-                // 高/低比值落在 40%~60% 的位是「判得勉强」的位。
-                // 这个数一直很小就说明弱光不是解码错，是飞控自己给的底色。
-                uint32_t d = (h > lo) ? (h - lo) : (lo - h);
-                if (d * 5u < per) nNear++;
+                if (per > perMax) perMax = per;
+                // v32.33：一位的时长超过两个位周期 = 帧中间断流（线被干扰瞬间断过），
+                // 这之后的分组就整体偏了 —— 断流是「颜色错位」唯一可靠的信号。
+                if (per > s_periodCyc * 2u) nGap++;
             }
         }
 
@@ -359,7 +390,7 @@ cap_done:
     g_rxSpike = (uint32_t)(g_rxSpike + nSpike);
     g_rxMerge = (uint32_t)(g_rxMerge + nMerge);
     g_rxNear  = (uint32_t)(g_rxNear + nNear);
-    fcEndFrame(cnt, t0);
+    fcEndFrame(cnt, t0, nGap, perMax, (glitch != 0) || (nGap != 0));
     if (cnt >= 24) s_ghostRun = 0;
     FC_IRQ_CLEAR();
     portEXIT_CRITICAL_ISR(&s_capMux);
@@ -422,11 +453,19 @@ void fcRxReset() {
     // ESP_ERR_INVALID_STATE（无害，不破坏任何东西）；只有真的丢了才会装上。
     // v32.31 的问题是先 remove 再 add，add 失败就永久没中断；这里不 remove。
     gpio_isr_handler_add(GPIO_NUM_4, fcRiseIsr, NULL);
-    s_frameReady = false;
-    s_wr = 0;
-    s_pub = 0;
-    s_nbits[0] = 0;
-    s_nbits[1] = 0;
+    // v32.33【关键兜底】gpio_isr_handler_add 在 handler 已存在时是**直接返回**
+    // （ESP_ERR_INVALID_STATE），它**不会**重新打开 GPIO 的边沿中断使能位。
+    // 也就是说：只要 INT_ENA 被谁清过一次（重配引脚、驱动内部操作、异常现场），
+    // 上面这行 add 就是空转 —— 中断永远不来，飞控信号一帧也收不到，
+    // 表现就是「灯全灭、BF 重启无效、只有 ESP32 重启才好」。
+    // gpio_intr_disable/enable 直接写使能位，幂等、不碰 handler 注册表，
+    // 每 2 秒兜一次，代价只有两条寄存器写。
+    gpio_intr_disable(GPIO_NUM_4);
+    gpio_intr_enable(GPIO_NUM_4);
+    // v32.33【竞态】这里原来还要把 s_wr / s_pub / s_nbits 全清 0，可它每 2 秒
+    // 就被主循环调用一次，而 ISR 可能正在写 s_bits[s_wr] —— 清了反而让
+    // 「边采边写」更乱（表现为偶发整条灯带颜色跳一下）。缓冲交给双缓冲自己
+    // 翻转就行，这里只清「静默 / 校准」这类纯状态量。
     s_ghostRun = 0;
     s_muteUntilCyc = 0;
     s_cal = 0;
