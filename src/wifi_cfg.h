@@ -48,5 +48,11 @@ void webSetBright(int v);
 void webSetCount(int v); // 设置 LED 数量（1~128，断电记忆，等价按键标定）
 int  webGetFcOrder();    // v32.23：飞控 LED 字节顺序索引 0~5（0=GRB…5=BGR）
 void webSetFcOrder(int v); // v32.23：改飞控字节顺序（颜色不对时逐个试），断电记忆
+// v32.29：运行健康诊断（网页日志显示，专治「灯全灭、日志也不动」这类现场问题）
+int  webGetTxRate();     // 每秒真正推给灯带的帧数（0 = 主循环没跑或 RMT 废了）
+int  webGetTxFail();     // RMT 发送失败累计（涨过 = 输出被打断过）
+int  webGetLoopGap();    // 最近一秒主循环最长间隔（ms，正常约 10）
+int  webGetFcSilent();   // 距上一帧飞控信号的秒数
+int  webGetRxReset();    // 采集链路自愈次数
 // 立即按当前设置刷新灯带（模式切换即时生效）
 void webApplyNow();

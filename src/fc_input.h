@@ -29,9 +29,15 @@ bool pollFcInput(FcFrame* out);
 
 // v32.26：采集开关。只有 Betaflight 模式(0)或标定中才需要飞控帧 ——
 // 因为采集期间要屏蔽全部中断约 1.4ms，本地灯效运行时没必要付这个代价。
-// 主循环每轮设一次：fcRxSetActive(s_mode == 0 || s_calibrating);
+// v32.29【重要】它同时是「输出/输入互斥」：本板 WS2812 输出（RMT）无 DMA，
+// 靠中断每 80µs 续填 FIFO，与采集的 1.4ms 中断屏蔽撞上就会断流 →
+// 灯珠收到残帧 → 亮部出现杂色，狠了通道卡死 → 灯带动不了。
+// 主循环必须：发完一帧才 fcRxSetActive(true)，收到一帧立刻 fcRxSetActive(false)。
 void fcRxSetActive(bool on);
 bool fcRxActive();
+
+// v32.29：把采集状态清干净（卡住不恢复时主循环会调它做自愈）
+void fcRxReset();
 
 // ---- v32.23：飞控一侧的通道顺序 ----
 // 板上 WS2812 常见的是 GRB，但飞控（Betaflight 的 ledstrip_grb_rgb 设置、
@@ -61,6 +67,12 @@ extern volatile uint32_t g_rxFrag;     // 不足 1 颗灯的残片，丢弃次�
 extern volatile uint32_t g_rxDropBits; // v32.26：最近一帧帧头丢掉的 bit 数（= cnt%24）
 extern volatile uint32_t g_rxGhost;    // v32.28：不是帧起点的中断次数（幽灵边沿 / 线上噪声）
 extern volatile uint32_t g_rxMute;     // v32.28：因幽灵边沿刷屏而静默采集的次数
+extern volatile uint32_t g_rxSpike;    // v32.29：被丢弃的振铃毛刺（累计）
+extern volatile uint32_t g_rxMerge;    // v32.29：被合并的「切开位」（累计）
+extern volatile uint32_t g_rxNear;     // v32.29：高/低比值接近 1 的「判得勉强」的位
+extern volatile uint32_t g_rxMisalign; // v32.29：bit 数不是 24N-1 的帧数（分组错位，杂色来源）
+extern volatile uint32_t g_rxBits;     // v32.29：最近一帧的原始 bit 数
+extern volatile uint16_t g_rxPeriodNs; // v32.29：实测位周期（ns）
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）
 extern volatile uint16_t g_rxHiMaxNs;  // 最长高位（ns）
 extern volatile uint16_t g_rxLoMaxNs;  // 最长低位（ns）

@@ -30,6 +30,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"   // esp_reset_reason / esp_restart
 #include "esp_wifi.h"     // v32.13：AP 发射功率限制（弱供电下保热点）
+#include "esp_task_wdt.h" // v32.29：主任务看门狗（卡死自动重启，不用拔电）
 // ---------- 时间工具 ----------
 static uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 static void delayMs(uint32_t ms) {
@@ -272,6 +273,21 @@ int webGetBright() { return s_brightPct; }  // v32.21：0~100（原来是 0~3 �
 int webGetCalib()  { return s_calibCount; }
 int webGetFcOrder(){ return s_fcOrder; }      // v32.23：飞控字节顺序索引 0~5
 bool webIsCalibrating() { return s_calibrating; }
+// ---------- v32.29：运行健康诊断（网页日志要看到，不然只能靠猜） ----------
+// 这三项专治「跑一段时间灯全灭、日志也不动」这类现场说不清的问题：
+//   txr 每秒钟真正推给灯带的帧数 —— 0 就是主循环没在跑或 RMT 废了
+//   txf RMT 发送失败次数 —— 涨过就说明输出被打断过（杂色/定格）
+//   lpm 最近一秒主循环最长一次「卡了多久」 —— 大了就是主循环被阻塞
+//   sil 距上一帧飞控信号多少秒 —— 涨说明飞控那边不发了 / 我们收不到了
+static volatile uint32_t s_lpMaxMs = 0;   // 主循环最大间隔（ms）
+static uint32_t s_txRate = 0;             // 每秒发送帧数
+static uint32_t s_fcSilentS = 0;          // 距上一帧飞控信号的秒数
+static uint32_t s_rxResetN = 0;           // 采集自愈次数
+int webGetTxRate()  { return (int)s_txRate; }
+int webGetTxFail()  { return (int)g_txFail; }
+int webGetLoopGap() { return (int)s_lpMaxMs; }
+int webGetFcSilent(){ return (int)s_fcSilentS; }
+int webGetRxReset() { return (int)s_rxResetN; }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
 void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
@@ -378,9 +394,23 @@ extern "C" void app_main(void) {
     uint32_t lastSeen = 0;
     uint32_t lastTxTotal = 0;
     uint32_t lastUrx = 0, lastUtx = 0; // MSP 透传字节（每秒差值）
+    uint32_t lastLoopMs = nowMs();
+    uint32_t fcLostLogMs = 0;
     FcFrame frame;
+    // v32.29：主任务挂到任务看门狗上。往后任何一处卡死（RMT、printf、NVS…）
+    // 8 秒后自动重启 —— 现场「灯全灭、只能拔电」从此不会再有。
+    esp_task_wdt_add(NULL);
+    esp_task_wdt_reset();
     while (1) {
         uint32_t now = nowMs();
+        esp_task_wdt_reset();
+        // 主循环间隔：正常 = 一次 delayMs(1) ≈ 10ms（tick 100Hz）。
+        // 明显大于 100ms 就是被谁阻塞了，记下来给网页看。
+        {
+            uint32_t d = now - lastLoopMs;
+            lastLoopMs = now;
+            if (d > s_lpMaxMs) s_lpMaxMs = d;
+        }
         // 0) 发送心跳：每秒打印 TX/RX 状态与统计（错误码每秒重复，防截断丢失）
         if (now - lastHbMs >= 1000) {
             lastHbMs = now;
@@ -388,23 +418,33 @@ extern "C" void app_main(void) {
             uint32_t cur = (uint32_t)g_txCount;
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
-            logMsg("[LED] tx=%u/s ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s\n",
-                   cur - lastTxTotal, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
+            s_txRate = (uint32_t)g_txCount - lastTxTotal;
+            s_fcSilentS = (now - s_lastFcMs) / 1000;
+            logMsg("[LED] tx=%u/s fail=%u ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s\n",
+                   s_txRate, (unsigned)g_txFail, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), wifiCfgDiag(), bleUartState(), otaVersion(),
                    urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag());
+            // v32.29：主循环卡顿/采集自愈（有才打，正常时一行都不多）
+            if (s_lpMaxMs > 100) {
+                logMsg("[LOOP] 主循环最长间隔 %lums（正常约 10ms）｜采集自愈 %lu 次｜飞控静默 %lus\n",
+                       (unsigned long)s_lpMaxMs, (unsigned long)s_rxResetN,
+                       (unsigned long)s_fcSilentS);
+            }
+            s_lpMaxMs = 0;   // 每秒归零，网页看到的是「最近一秒」的最大卡顿
             // v32.24：飞控解码质量单独一行（每 5 秒），便于判断「跳色」是不是解码错帧
             if (now - lastRxLogMs >= 5000) {
                 lastRxLogMs = now;
                 char head[48];
                 fcRxHeadHex(head, sizeof(head));
-                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u frag=%u clamp=%u ghost=%u mute=%u led=%u drop=%u | hi=%u..%u lo=%u thr=%u ns | cap=%uus ord=%s head=%s\n",
+                logMsg("[RX] ok=%d err=0x%x frames=%u bits=%u mis=%u spike=%u merge=%u near=%u | hi=%u..%u lo=%u per=%u thr=%u ns | frag=%u ghost=%u cap=%uus ord=%s head=%s\n",
                        fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
-                       (uint32_t)g_rxFrames, (uint32_t)g_rxBad, (uint32_t)g_rxFrag,
-                       (uint32_t)g_rxClamp,
-                       (uint32_t)g_rxGhost, (uint32_t)g_rxMute,
-                       (uint32_t)g_rxLastLeds, (uint32_t)g_rxDropBits,
+                       (uint32_t)g_rxFrames, (uint32_t)g_rxBits,
+                       (uint32_t)g_rxMisalign, (uint32_t)g_rxSpike,
+                       (uint32_t)g_rxMerge, (uint32_t)g_rxNear,
                        (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
-                       (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
+                       (unsigned)g_rxLoMaxNs, (unsigned)g_rxPeriodNs,
+                       (unsigned)g_rxThrNs,
+                       (uint32_t)g_rxFrag, (uint32_t)g_rxGhost,
                        (unsigned)g_rxCapUs,
                        fcRxOrderName(), head);
             }
@@ -418,21 +458,28 @@ extern "C" void app_main(void) {
             if (ev != BTN_NONE) handleButton(ev);
         }
         // 2) 飞控信号轮询
-        //    v32.22 修复「进过飞控模式后切不回灯效」：
-        //    原来这里是「任意模式只要收到帧就接管显示」，而飞控按 20Hz 持续推帧，
-        //    于是 s_fcActive 永远为真、主循环第 4 步的灯效渲染被整条跳过 ——
-        //    用户在网页/按键切到灯效模式，帧是切了，但灯一颗都不变（看着像不受控）。
-        //    现在只有「飞控模式(0)」才把控制权交给飞控；标定仍需帧来数灯珠。
-        // v32.24：飞控只要还在发帧就续上「存活」时间戳（哪怕那一帧因数据异常被
-        // 整帧丢弃），否则连续几次坏帧会把「信号丢失」误判成真、把灯带灭掉。
-        // v32.26：只有 Betaflight 模式/标定时才开采集 —— 采集要屏蔽全部中断约 1.4ms，
-        // 用本地灯效时完全没必要付这个代价
-        fcRxSetActive(s_mode == 0 || s_calibrating);
+        //    v32.29【关键】采集窗与灯带发送必须互斥。
+        //    本板 RMT 无 DMA：一帧 45 颗要 1.4ms，靠中断每 80µs 续填一次 FIFO。
+        //    而飞控采集为了测准位宽要屏蔽全部中断 1.3ms —— 两者重叠就是
+        //    RMT 断流 → 灯珠收到残帧（前段新色、后段旧色 = 亮部杂色），
+        //    狠了通道直接卡死 → 灯带再也不动（全灭，只能重启）。
+        //    现在的节奏：灯带这一帧确实发完(ledOutWaitIdle) → 开采集窗 →
+        //    收到一帧立刻关窗 → 渲染 + 发送 → 再开窗。
+        bool wantFc = (s_mode == 0 || s_calibrating);
+        if (wantFc) {
+            if (!fcRxActive()) {
+                ledOutWaitIdle();      // 等 RMT 把这帧送完，再让 ISR 去屏蔽中断
+                fcRxSetActive(true);
+            }
+        } else if (fcRxActive()) {
+            fcRxSetActive(false);
+        }
         if ((uint32_t)g_rxSeen != lastSeen) {
             lastSeen = (uint32_t)g_rxSeen;
             s_lastFcMs = now;          // 标定期间也要，免得退出标定误判超时
         }
         if (pollFcInput(&frame)) {
+            fcRxSetActive(false);      // 收到就把中断还回去：RMT/射频/按键都要它
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();
@@ -448,6 +495,9 @@ extern "C" void app_main(void) {
             s_lastFxMs = now - fxIntervalMs();
         }
         // 3) 飞控信号丢失：超时后释放接管，恢复当前模式显示
+        //    v32.29：光灭灯不够，还要**自愈**。现象「跑一段时间收不到飞控、重启就好」
+        //    说明采集链路（中断/状态机）偶尔会卡住。现在连续 3 秒没帧就重挂一次
+        //    GPIO 中断并把采集状态清干净，不用重启也能回来。
         if (!s_calibrating && s_fcActive &&
             (now - s_lastFcMs) > FC_TIMEOUT_MS) {
             s_fcActive = false;
@@ -455,6 +505,20 @@ extern "C" void app_main(void) {
                 for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
                 refreshStrip();
             } // 灯效模式：不灭灯，灯效渲染自然接管
+        }
+        if (s_mode == 0 && (now - s_lastFcMs) > 3000) {
+            if (fcLostLogMs == 0) {
+                fcLostLogMs = now;
+                logMsg("[RX] 3 秒没收到飞控帧，重置采集链路（不用重启）sil=%lums\n",
+                       (unsigned long)(now - s_lastFcMs));
+            }
+            if (now - fcLostLogMs > 2000) {
+                fcLostLogMs = now;
+                fcRxReset();
+                s_rxResetN++;
+            }
+        } else {
+            fcLostLogMs = 0;
         }
         // 4) 灯效模式渲染（非标定 && 无飞控接管 && 模式 1~9，按速度决定帧间隔）
         if (!s_calibrating && !s_fcActive && s_mode != 0 &&

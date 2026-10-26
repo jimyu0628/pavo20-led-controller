@@ -137,7 +137,10 @@ static void sendState(httpd_req_t* req) {
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
              "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
              "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"ghost\":%u,\"mute\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
-             "\"dropb\":%u,\"cap\":%u}",
+             "\"dropb\":%u,\"cap\":%u,"
+             // v32.29：健康诊断
+             "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
+             "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -151,7 +154,12 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxGhost, (unsigned)g_rxMute,
              (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
              (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
-             (unsigned)g_rxDropBits, (unsigned)g_rxCapUs);
+             (unsigned)g_rxDropBits, (unsigned)g_rxCapUs,
+             webGetTxRate(), webGetTxFail(), webGetLoopGap(),
+             webGetFcSilent(), webGetRxReset(),
+             (unsigned)g_rxBits, (unsigned)g_rxMisalign,
+             (unsigned)g_rxSpike, (unsigned)g_rxMerge,
+             (unsigned)g_rxNear, (unsigned)g_rxPeriodNs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);

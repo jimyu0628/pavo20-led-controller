@@ -1245,14 +1245,18 @@ function renderDev(j){
             "[BLE ] " + (j.ble||"?") + "\n" +
             "[BLE ] " + (j.bdiag||"?") + "\n" +
             "[MSP ] " + (j.msp||"?") + "\n" +
+            "[LED ] 发送 " + (j.tx|0) + "/s · 失败 " + (j.txf|0) +
+                     " · 循环卡顿 " + (j.lpm|0) + "ms\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
-                     " · 末帧 " + (j.lend|0) + " 颗\n" +
-            "[RX  ] 异常帧 " + (j.bad|0) + " · 残片 " + (j.frag|0) + " · 强制位 " + (j.clamp|0) +
-                     " · 帧头丢 " + (j.dropb|0) + "bit\n" +
-            "[RX  ] 幽灵边沿 " + (j.ghost|0) + " · 静默 " + (j.mute|0) + " 次" +
-                     ((j.mute|0) > 0 ? "（线被干扰，采集已自动让路）" : "") + "\n" +
+                     " · 末帧 " + (j.lend|0) + " 颗 · 位周期 " + (j.per|0) + "ns\n" +
+            "[RX  ] 位数 " + (j.bits|0) + " · 错位帧 " + (j.mis|0) +
+                     " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
+                     " · 临界位 " + (j.near|0) + "\n" +
             "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
                      "ns · 最长低位 " + (j.lomax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
+            "[RX  ] 残片 " + (j.frag|0) + " · 幽灵边沿 " + (j.ghost|0) + " · 静默 " + (j.mute|0) +
+                     " · 自愈 " + (j.rxs|0) + " · 飞控静默 " + (j.sil|0) + "s" +
+                     ((j.sil|0) > 1 ? "（收不到飞控信号！）" : "") + "\n" +
             "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;

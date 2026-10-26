@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
 #include "driver/rmt_tx.h"
 #include "driver/rmt_encoder.h"
 
@@ -10,6 +11,8 @@ static rmt_encoder_handle_t s_copyEnc = NULL;
 static rmt_symbol_word_t s_txSymbols[STRIP_MAX_LEDS * 24 + 1];
 
 volatile uint32_t g_txCount = 0; // 成功发送帧计数（心跳诊断）
+volatile uint32_t g_txFail = 0;  // v32.29：发送失败次数（通道卡死的直接证据）
+volatile int      g_txLastErr = 0; // v32.29：最近一次失败的错误码
 static esp_err_t s_ledErr = ESP_OK; // 初始化失败错误码（延迟到 USB 就绪后打印）
 
 bool ledOutOk() { return s_txCh != NULL && s_copyEnc != NULL; }
@@ -71,20 +74,42 @@ void ledOutInit() {
     rmt_enable(s_txCh);
 }
 
+// ---------- 等待发送彻底结束 ----------
+// v32.29：fc_input 的采集窗要在这个之后才开。rmt_transmit 只是把事务排进队列就
+// 返回了，硬件还要 1.4ms 才发完；这期间开采集（屏蔽全部中断 1.3ms）会把续填
+// FIFO 的中断一起屏蔽掉 → 灯带收到残帧。
+void ledOutWaitIdle() {
+    if (s_txCh != NULL) rmt_tx_wait_all_done(s_txCh, pdMS_TO_TICKS(30));
+}
+
 // ---------- 发送一帧 ----------
+// v32.29：发送失败必须自愈，不能靠重启。
+// 现场症状「跑一段时间灯全灭、重启才恢复」完全对得上 RMT 通道卡死：
+// 本板 RMT 无 DMA，长帧靠中断每 80µs 续填一次 FIFO；只要有一次续填被推迟
+// （飞控采集那 1.3ms 的中断屏蔽就够），输出就断流，队列里残留的事务永远
+// 等不到完成中断 → rmt_transmit 一直返回 ESP_ERR_INVALID_STATE → 灯带再也不动。
+// 现在：失败就把通道关掉再打开（清空队列与状态机），下一帧继续发。
+static void txRecover() {
+    rmt_disable(s_txCh);
+    rmt_enable(s_txCh);
+}
+
 void showStrip(const RGB* leds, int n) {
     if (s_txCh == NULL || s_copyEnc == NULL) return; // 通道/编码器未就绪：跳过，避免报错刷屏
     if (n <= 0) n = 1;
     if (n > STRIP_MAX_LEDS) n = STRIP_MAX_LEDS;
     int len = encodeStripToSymbols(leds, n, s_txSymbols);
 
-    rmt_tx_wait_all_done(s_txCh, 20); // 等上一帧发完，避免队列积压
+    rmt_tx_wait_all_done(s_txCh, pdMS_TO_TICKS(20)); // 等上一帧发完，避免队列积压
     rmt_transmit_config_t tcfg = {};
     tcfg.loop_count = 0;
     // 注意：payload_bytes 是字节数，不是符号数（copy 编码器按字节数解析符号数组）
     esp_err_t e = rmt_transmit(s_txCh, s_copyEnc, s_txSymbols,
                                (size_t)len * sizeof(rmt_symbol_word_t), &tcfg);
     if (e != ESP_OK) {
+        g_txFail++;
+        g_txLastErr = (int)e;
+        txRecover();
         // 发送失败诊断：错误码 + 本帧符号数
         printf("[LED] rmt_transmit err %s (0x%x) syms=%d\n",
                esp_err_to_name(e), e, len);

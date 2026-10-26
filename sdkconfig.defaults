@@ -7,6 +7,10 @@
 
 # USB-Serial-JTAG 作为系统控制台（printf 输出到 USB）
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+# v32.29：主任务看门狗 —— 主循环一旦卡死（RMT/printf/NVS 任一处）就重启，
+# 不再需要现场拔电。8 秒足够覆盖 OTA 写入等长操作。
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=8
 
 # 开启帧指针：崩溃时输出完整 backtrace（便于定位问题）
 CONFIG_ESP_SYSTEM_USE_FRAME_POINTER=y
