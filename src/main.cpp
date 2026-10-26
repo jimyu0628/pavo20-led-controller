@@ -95,7 +95,8 @@ static int s_calibCount = STRIP_DEFAULT_LEDS; // 标定灯数（实际灯带长�
 static bool s_calibrating = false;
 static int s_calCount = STRIP_DEFAULT_LEDS;   // 标定过程中的计数
 // v32.23：飞控侧 LED 字节顺序（0=GRB 1=RGB 2=BRG 3=RBG 4=GBR 5=BGR），断电记忆
-static int s_fcOrder = 3;
+// v32.27：出厂默认改成 5(BGR) —— 这台飞控 + 这条灯带实测只有 BGR 颜色才对
+static int s_fcOrder = 5;
 // 灯带显示缓冲 + 实际显示长度
 static RGB s_strip[STRIP_MAX_LEDS];
 static int s_stripLen = STRIP_DEFAULT_LEDS;
@@ -136,8 +137,8 @@ static void loadPrefs() {
         s_brightPct = BRIGHT_STEPS[(oi < BRIGHT_COUNT) ? oi : 2];
     }
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
-    s_fcOrder    = nvsGetU8("ford", 3);   // v32.23：飞控字节顺序，默认 RBG
-    if (s_fcOrder < 0 || s_fcOrder > 5) s_fcOrder = 3;
+    s_fcOrder    = nvsGetU8("ford", 5);   // v32.27：飞控字节顺序，默认 BGR
+    if (s_fcOrder < 0 || s_fcOrder > 5) s_fcOrder = 5;
     fcSetRxOrder(s_fcOrder);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
@@ -366,8 +367,8 @@ extern "C" void app_main(void) {
     // 开机信息存入 Web 调试区（USB 串口连上较慢错过开机日志时，网页可查看）
     char bi[512];
     snprintf(bi, sizeof(bi),
-             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | build %s %s | 颜色 %d 速度 %d 亮度 %d%% | LED %s | 复位原因 %d",
-             otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode,
+             "版本 %s | 设备名 %s | 灯数 %d | 比例 1:%d | 模式 %d | 飞控色序 %s | build %s %s | 颜色 %d 速度 %d 亮度 %d%% | LED %s | 复位原因 %d",
+             otaVersion(), DEV_NAME, s_calibCount, currentRatio(), s_mode, fcRxOrderName(),
              __DATE__, __TIME__, s_colorIdx, s_speedPct, s_brightPct,
              ledOutOk() ? "OK" : "FAIL", (int)esp_reset_reason());
     wifiCfgSetBootInfo(bi);

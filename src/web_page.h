@@ -1251,6 +1251,7 @@ function renderDev(j){
                      " · 帧头丢 " + (j.dropb|0) + "bit\n" +
             "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
                      "ns · 最长低位 " + (j.lomax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
+            "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;
 }

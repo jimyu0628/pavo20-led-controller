@@ -125,12 +125,17 @@ static void touchHttp() {
 static void sendState(httpd_req_t* req) {
     // boot 字符串本身约 170 字节，加上其余字段整条 500 上下，1400 留足余量
     char buf[1400];
+    // v32.27：把最近一帧前 4 颗灯的「线路原始字节」也吐给网页（形如 00FF00 00FF00 …）。
+    // 飞控设成纯红时：原始字节里哪个位置是 FF，就说明字节序是哪个 —— 排颜色问题时
+    // 不用猜、也不用插 USB 看串口，网页日志里直接能对。
+    char head[48];
+    fcRxHeadHex(head, sizeof(head));
     snprintf(buf, sizeof(buf),
              "{\"mode\":%d,\"color\":%d,\"spd\":%d,\"bright\":%d,\"count\":%d,\"maxc\":%d,"
              "\"cal\":%d,\"ssid\":\"%s\",\"ip\":\"%s\",\"sta\":%d,\"idle\":%d,"
              "\"v\":\"%s\",\"bld\":\"%s %s\",\"up\":%lu,\"rs\":%d,"
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
-             "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,"
+             "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
              "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
              "\"dropb\":%u,\"cap\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
@@ -141,7 +146,7 @@ static void sendState(httpd_req_t* req) {
              (unsigned long)(esp_timer_get_time() / 1000000), (int)esp_reset_reason(),
              bleUartState(), wifiCfgDnsOk(), (unsigned long)g_rxFrames,
              mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo(),
-             webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd,
+             webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd, head,
              (unsigned)g_rxBad, (unsigned)g_rxFrag, (unsigned)g_rxClamp,
              (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
              (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,

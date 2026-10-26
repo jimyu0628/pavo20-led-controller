@@ -57,6 +57,12 @@
 #define FC_CAP_MAX_CYC    800000u
 // 高电平短到物理上不可能的最小值（20 cycle ≈ 125ns）→ 漏检上升沿
 #define FC_HI_MIN_CYC     20u
+// v32.27：低于这个宽度的高位当「毛刺」处理（40 cycle ≈ 250ns，只有 T0H=400ns 的
+// 六成长度）。这种样本一旦混进「最短高位 hmin」，学出来的阈值就会被拖偏 ——
+// v32.26 现场日志 `高位 0~0ns · 阈值 493ns` 就是这么来的（(186+800)/2=493），
+// 而 0 码高电平 400ns 距 493ns 只剩 93ns 余量，稍有抖动就把 0 判成 1，
+// 于是「本该灭的灯发弱光」。现在毛刺不参与学阈值，阈值自然回到 600ns（0/1 各留 200ns）。
+#define FC_HI_GLITCH_CYC  40u
 // 高电平上限 = 阈值的 2.2 倍。超过说明测量被拉长，该 bit 按 0 处理
 #define FC_HI_MAX_X10     22u
 
@@ -87,6 +93,17 @@ static volatile uint8_t  s_cal = 0;          // 0=还没学到，第一帧直接
 // 本帧统计
 static volatile uint32_t s_fHiMin, s_fHiMax, s_fLoMax;
 static volatile uint32_t s_sumPeriod, s_nPeriod;
+// v32.27：本帧「按当前阈值分成两簇」的高位总和/个数。阈值就取两簇均值的中点 ——
+// 这是本次修「灭灯区发弱光」的关键：
+//   忙等测宽本身有系统性偏差（进循环取 h0 晚几拍、退出判定的那次循环又少算一拍，
+//   实测比真值短 100~150ns），所以 0 码测出来约 270ns、1 码约 670ns。
+//   旧代码用「本帧最短/最长高位」的中点定阈值 —— 这两个值恰恰是离群点，
+//   某一帧里混进一个 186ns 的毛刺，阈值就被拽到 493ns，
+//   距 0 码只有 93ns（约 15 个 CPU 周期）的余量，抖一下 0 就判成 1，
+//   那些本该灭掉的灯于是发出很弱的杂色。
+//   改成两簇均值中点后：偏差对两簇是同等的，中点自动落在真正该在的位置；
+//   而且上千个 bit 做平均，个别毛刺根本撼动不了它。
+static volatile uint32_t s_h0Sum, s_h0N, s_h1Sum, s_h1N;
 
 // ---- 通道顺序（v32.23）----
 // 每个条目是「输出 r/g/b 分别取自原始第几字节」。
@@ -101,9 +118,11 @@ static const uint8_t s_orderMap[6][3] = {
     {2, 1, 0}, // 5 BGR
 };
 static const char* s_orderName[6] = {"GRB", "RGB", "BRG", "RBG", "GBR", "BGR"};
-// 默认 3(RBG)：v32.23 按实测「红→绿、蓝→红」反推得到，保留不动。
-// 若某天换了飞控/改了 ledstrip_grb_rgb，在网页「连接」页点一下就能换。
-static volatile uint8_t s_rxOrder = 3;
+// 默认 5(BGR)：v32.23 按「红→绿、蓝→红」反推成 RBG，v32.26 实测只有 BGR 颜色才对
+// （红显示红、蓝显示蓝）。BGR/RBG 互换说明两端字节序正好差了一次 r↔b 交换，
+// 属于正常现象 —— 飞控的 ledstrip_grb_rgb 设置、灯珠型号、走线都有影响，
+// 所以做成可切换并断电记忆；这里只是把「这台硬件实测对了」的那个设成出厂默认。
+static volatile uint8_t s_rxOrder = 5;
 
 void fcSetRxOrder(int v) {
     if (v >= 0 && v < 6) s_rxOrder = (uint8_t)v;
@@ -143,33 +162,49 @@ bool fcRxActive() { return s_active; }
 // ---------- 帧结束：对齐 → 发布 ----------
 static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
     g_rxSeen = (uint32_t)(g_rxSeen + 1);
+    uint32_t capUs = (uint32_t)((esp_cpu_get_cycle_count() - t0) * 25u / 4u / 1000u);
+
+    // v32.27：残片（连一颗灯都没凑齐）不再覆盖「本帧诊断」。
+    // 原来这里先写 g_rxLedAtEnd / g_rxCapUs 再判断残片，而采完一帧之后必然还有
+    // 一次「幽灵中断」（见 fcRiseIsr 末尾的说明）会采到 0 bit，
+    // 于是网页日志上永远显示 末帧 0 颗 · 高位 0~0ns · 捕获 51µs ——
+    // 全是那个空帧的读数，把真帧的质量数据盖掉了（v32.26 现场日志正是如此）。
+    if (cnt < 24) {
+        g_rxFrag = (uint32_t)(g_rxFrag + 1);
+        return;
+    }
+
     g_rxLedAtEnd = (uint32_t)(cnt / 24);
     g_rxDropBits = (uint32_t)(cnt % 24);
-    g_rxCapUs = (uint16_t)((esp_cpu_get_cycle_count() - t0) * 25u / 4u / 1000u);
+    g_rxCapUs = (uint16_t)((capUs > 0xFFFFu) ? 0xFFFFu : capUs);
     // 帧内一个 bit 都没测到时 s_fHiMin 还是哨兵值，别拿去换算（会溢出）
     g_rxHiMinNs = (s_fHiMin > 2000) ? 0 : (uint16_t)CYC_TO_NS(s_fHiMin);
     g_rxHiMaxNs = (uint16_t)CYC_TO_NS(s_fHiMax);
     g_rxLoMaxNs = (uint16_t)CYC_TO_NS(s_fLoMax);
 
-    if (cnt < 24) {
-        g_rxFrag = (uint32_t)(g_rxFrag + 1);   // 残片：连一颗灯都凑不齐
-        return;
-    }
-
-    // 学到阈值：最短/最长高位取中点（要求两者分得开，即本帧 0/1 都有）。
-    // 采集已经无中断干扰，hmin 会稳定落在 400ns 附近；仍保留「不低于 hmax*2/5」
-    // 的保护，防止某帧只有单色（全是 0 码或全是 1 码）时把阈值带偏。
+    // 学到阈值。主路：两簇均值取中点（上千 bit 平均，抗毛刺，且自动抵消测宽偏差）。
+    // 备用路：两簇分不开时（整帧全黑或全亮、或阈值一开始就偏到离谱）退回「最短/最长
+    // 高位的中点」，并对明显是毛刺的 hmin 先做闸门过滤。
     uint32_t hmin = s_fHiMin, hmax = s_fHiMax;
-    if (hmin != 0xFFFFFFFFu && hmax > 0) {
-        if (hmin < hmax * 2u / 5u) hmin = hmax * 2u / 5u;
-        if (hmax > hmin + hmin / 2u) {
-            uint32_t t = (hmin + hmax) / 2u;
-            if (t < 24) t = 24;
-            if (t > 300) t = 300;
-            // 第一次直接采用（刷机后第一帧就准），之后 1/8 平滑跟随
-            s_thrCyc = s_cal ? ((s_thrCyc * 7 + t) / 8) : t;
+    if (hmin < FC_HI_GLITCH_CYC) hmin = 0;         // 毛刺：本帧不参与
+    bool learned = false;
+    if (s_h0N >= 8 && s_h1N >= 8) {
+        uint32_t a0 = s_h0Sum / s_h0N;             // 0 码实测均值
+        uint32_t a1 = s_h1Sum / s_h1N;             // 1 码实测均值
+        if (a1 > a0 + a0 / 3u) {                   // 两簇确实分得开（>1.33 倍）
+            uint32_t t = (a0 + a1) / 2u;
+            // 两簇是平均过的，几乎不含抖动，可以直接跟得紧一些
+            s_thrCyc = s_cal ? ((s_thrCyc * 3 + t) / 4) : t;
             s_cal = 1;
+            learned = true;
         }
+    }
+    if (!learned && hmin > 0 && hmax > hmin + hmin / 2u) {
+        uint32_t t = (hmin + hmax) / 2u;
+        if (t < 24) t = 24;
+        if (t > 300) t = 300;
+        s_thrCyc = s_cal ? ((s_thrCyc * 7 + t) / 8) : t;
+        s_cal = 1;
     }
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
 
@@ -182,6 +217,14 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
 }
 
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
+// 退出临界区前必须清掉 GPIO 中断状态锁存。整帧的 1080 个上升沿都会把这个锁存位
+// 重新置起来（它只看 GPIO_PINn_INT_ENA，不受 CPU 全局中断使能影响），所以
+// portEXIT_CRITICAL_ISR 一开中断，CPU 立刻又进一次本 ISR —— 那时线已经是低的，
+// 只会在里面空等 50µs 然后记一个「残片」再退出。
+// v32.26 现场日志 残片 5358 ≈ LED 帧 5356（每帧正好多一次）就是这次幽灵中断，
+// 它白烧 50µs CPU，还把网页日志的「本帧诊断」全刷成 0。
+#define FC_IRQ_CLEAR()   REG_WRITE(GPIO_STATUS_W1TC_REG, FC_GPIO_BIT)
+
 static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
     if (!s_active) return;      // 不需要飞控灯的场合（本地灯效）直接走开
@@ -196,6 +239,7 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
         if ((esp_cpu_get_cycle_count() - t0) > FC_ENTRY_MAX_CYC) {
             g_rxDrop = (uint32_t)(g_rxDrop + 1);   // 线常高：没在发数据
+            FC_IRQ_CLEAR();
             portEXIT_CRITICAL_ISR(&s_capMux);
             return;
         }
@@ -211,29 +255,38 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     s_fLoMax = 0;
     s_sumPeriod = 0;
     s_nPeriod = 0;
+    s_h0Sum = 0; s_h0N = 0; s_h1Sum = 0; s_h1N = 0;
     uint8_t shortHi = 0;
     g_rxDone = (uint32_t)(g_rxDone + 1);
 
-    uint32_t w0 = 0, lo = 0, h0 = 0, hi = 0;
+    uint32_t w0 = 0, lo = 0, hi = 0;
 
     while (1) {
         // ---- 低电平段（bit 之间的间隔）----
+        // v32.27：边沿时刻取「最后一次仍为低」与「第一次读到高」的中点，
+        // 把轮询粒度（一拍≈12 周期≈75ns）带来的误差从「单向少算」变成「对称 ±半拍」。
+        // 原来单向少算 100~150ns，0/1 两簇整体左移且不对齐，阈值中点跟着偏。
         w0 = esp_cpu_get_cycle_count();
-        lo = 0;
+        uint32_t tLowLast = w0;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
-            lo = esp_cpu_get_cycle_count() - w0;
-            if (lo > FC_GAP_CYC) goto cap_done;                  // 帧尾 reset
-            if ((w0 - t0) > FC_CAP_MAX_CYC) goto cap_done;       // 整体超时
+            tLowLast = esp_cpu_get_cycle_count();
+            if (tLowLast - w0 > FC_GAP_CYC) goto cap_done;   // 帧尾 reset（同时也是死循环保险）
         }
+        uint32_t tRise = (tLowLast + esp_cpu_get_cycle_count()) / 2u;
 
         // ---- 高电平段（决定这一 bit 是 0 还是 1）----
-        h0 = esp_cpu_get_cycle_count();
-        hi = 0;
+        uint32_t tHiLast = tRise;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
-            hi = esp_cpu_get_cycle_count() - h0;
-            if (hi > FC_GAP_CYC) goto cap_done;                  // 线被拉高 / 帧尾
-            if ((h0 - t0) > FC_CAP_MAX_CYC) goto cap_done;       // 整体超时
+            tHiLast = esp_cpu_get_cycle_count();
+            if (tHiLast - tRise > FC_GAP_CYC) goto cap_done; // 线被拉长 / 帧尾（同上是保险）
         }
+        uint32_t tFall = (tHiLast + esp_cpu_get_cycle_count()) / 2u;
+
+        hi = tFall - tRise;
+        lo = tRise - w0;
+        // 整帧硬上限（每 bit 判一次，不在内层轮询里加开销）：
+        // 线一直被拉成有跳变但不成帧时，别在「无中断」状态里卡死
+        if (tFall - t0 > FC_CAP_MAX_CYC) goto cap_done;
 
         // ---- 统计（只做诊断，不再拿这些判据整帧作废）----
         if (hi < FC_HI_MIN_CYC) shortHi = 1;
@@ -251,6 +304,9 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         } else {
             one = (hi > s_thrCyc);
         }
+        // 按判定结果分簇累计（供帧尾算两簇均值中点当新阈值）
+        if (one) { s_h1Sum += hi; s_h1N++; }
+        else     { s_h0Sum += hi; s_h0N++; }
 
         // ---- 压入 bit（按字节攒，省得每个 bit 都读改写）----
         if (cnt < FC_MAX_BITS) {
@@ -268,6 +324,7 @@ cap_done:
     if (accN) *wp = (uint8_t)(acc << (8 - accN));   // 末尾不满一字节，低位补 0
     if (shortHi) g_rxBad = (uint32_t)(g_rxBad + 1);
     fcEndFrame(cnt, t0);
+    FC_IRQ_CLEAR();          // 清掉整帧积累的上升沿锁存，避免退出后再空转一次
     portEXIT_CRITICAL_ISR(&s_capMux);
 }
 
