@@ -145,7 +145,8 @@ static int s_stripLen = STRIP_DEFAULT_LEDS;
 // v32.22：s_fcActive 只可能在「飞控模式(s_mode==0)」且真的收到帧时为 true。
 // 一旦切到灯效模式必须立刻清掉，否则灯效渲染（主循环第 4 步）会被永久跳过。
 static bool s_fcActive = false;   // true=飞控正在接管显示（仅飞控模式）
-static uint32_t s_lastFcMs = 0;   // 最后一次有效飞控帧时间
+static bool s_fcBlanked = false;  // v32.35：已因信号丢失灭过灯（避免每秒重复清屏）
+static uint32_t s_lastFcMs = 0;   // 最后一次有效飞控帧时间（只认「已解出并上屏」的帧）
 // 效果帧节奏
 static uint32_t s_lastFxMs = 0;
 static int s_fxPhase = 0;
@@ -218,10 +219,28 @@ static int currentRatio() {
 // 最后一颗的颜色，避免灯带末端出现一小段黑。
 static int s_fcPeak = 0;
 static uint8_t s_peakLowRun = 0;   // v32.30：连续「本帧比峰值少」的帧数
+// v32.35：一帧解出的灯数最多比基准多多少，多出来就按「解错了」处理。
+//   现场「彩虹跑几分钟突然卡住」有一半是这里：偶发一帧解出 64 颗（把噪声当成位），
+//   峰值被抬到 64，之后每帧 off=64-42=22 → 前 22 颗全部「保持上一帧」不动，
+//   只有末端两三颗在变 —— 肉眼就是「画面停住了」。
+#define FC_PEAK_JUMP_MAX  8
+static uint8_t s_peakJumpRun = 0;  // v32.35：连续「比基准多太多」的帧数
 static void mapFcToStrip(const FcFrame& frame) {
     int ratio = currentRatio();
     int have = frame.count;
     if (have <= 0) return;
+    // v32.35：离谱的帧直接丢，绝不让它污染基准（丢一帧看不出来，抬错基准会卡住画面）。
+    // 但要留一条活路：用户真的在 BF 里把 LED 数量改大时，会连续很多帧都「偏大」，
+    // 连续 30 帧（≈0.65 秒）都是同一个偏大值，就认账、把基准抬上去。
+    if (s_fcPeak > 0 && have > s_fcPeak + FC_PEAK_JUMP_MAX) {
+        if (++s_peakJumpRun < 30) return;
+        s_fcPeak = have;
+        s_peakJumpRun = 0;
+        s_peakLowRun = 0;
+    } else {
+        s_peakJumpRun = 0;
+    }
+    if (have > FC_MAX_LEDS) return;
     // v32.30：峰值只用来补「偶尔少 1~2 颗」（中断延迟导致帧头丢位），不能只增不减。
     // 否则一次解码错乱（解出 42 颗）就把基准永久抬高，飞控侧把灯数改小之后
     // 本板永远跟不上 —— 末端该灭的灯会一直亮着。连续 20 帧（≈1 秒）都少就跟下来。
@@ -241,6 +260,8 @@ static void mapFcToStrip(const FcFrame& frame) {
     //   1~3 颗，肉眼看着就是抖动/跳格；比例 1:2 时平移还会被放大成明暗跳变。
     int off = s_fcPeak - have;
     if (off < 0) off = 0;
+    // v32.35：偏移太离谱 = 这帧不是正常帧尾对齐，宁可扔掉也不要把整条画面冻住
+    if (off > FC_PEAK_JUMP_MAX * 2) return;
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
         if (src >= fc) { s_strip[i] = RGB(); continue; }  // 超出飞控灯数：灭
@@ -502,7 +523,8 @@ extern "C" void app_main(void) {
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
     uint32_t lastRxLogMs = 0;
-    uint32_t lastSeen = 0;
+    uint32_t lastFrames = 0;   // v32.35：上一次已发布帧计数（判「飞控还在不在」）
+    uint32_t lastFragN = 0, lastFrameN = 0;   // v32.35：碎片风暴检测
     uint32_t lastTxTotal = 0;
     uint32_t lastUrx = 0, lastUtx = 0; // MSP 透传字节（每秒差值）
     uint32_t lastLoopMs = nowMs();
@@ -532,7 +554,8 @@ extern "C" void app_main(void) {
             const char* wst = wifiCfgState() == 0 ? "off" : (wifiCfgState() == 2 ? "keep" : "ap");
             uint32_t urx = bleUartRxCount(), utx = bleUartTxCount();
             s_txRate = (uint32_t)g_txCount - lastTxTotal;
-            s_fcSilentS = (now - s_lastFcMs) / 1000;
+            // v32.35：没收到过帧时不要把「开机多久」当成「飞控静默多久」
+            s_fcSilentS = s_lastFcMs ? (now - s_lastFcMs) / 1000 : 0;
             logMsg("[LED] tx=%u/s fail=%u ok=%d err=0x%x | [WiFi] %s %s %s | [BLE] %s | %s | [MSP] rx=%u/s tx=%u/s %s | [TCP] %s\n",
                    s_txRate, (unsigned)g_txFail, ledOutOk() ? 1 : 0, (unsigned)ledOutErr(),
                    wst, wifiCfgStr(), wifiCfgDiag(), bleUartState(), otaVersion(),
@@ -542,6 +565,28 @@ extern "C" void app_main(void) {
                 logMsg("[LOOP] 主循环最长间隔 %lums（正常约 10ms）｜采集自愈 %lu 次｜窗口超时 %lu｜飞控静默 %lus\n",
                        (unsigned long)s_lpMaxMs, (unsigned long)s_rxResetN,
                        (unsigned long)s_capWinDrop, (unsigned long)s_fcSilentS);
+            }
+            // v32.35【碎片风暴自我修复】
+            //   现场日志 `残片 732220` = 七十多万次「ISR 进来了但一位有效数据都没收到」，
+            //   一秒能到几千次，全是 WiFi 开到 AP 模式后 GPIO4 长线上拾取的射频尖峰。
+            //   它本身不致命（v32.35 已把每次的代价从 50µs 压到 6µs），但一旦真的
+            //   把采集状态弄乱（比如半帧粘连），光靠被动等待是回不来的。
+            //   这里每秒算一次增量：1 秒内 >400 次无效采集、却一帧有效都没有 → 认定风暴，
+            //   立刻强复位采集链路并关窗退避，不要等 3 秒/25 秒那两道慢保护。
+            {
+                uint32_t dfr = (uint32_t)g_rxFrag - lastFragN;
+                uint32_t dfm = (uint32_t)g_rxFrames - lastFrameN;
+                lastFragN = (uint32_t)g_rxFrag;
+                lastFrameN = (uint32_t)g_rxFrames;
+                if (s_mode == 0 && !s_calibrating && dfr > 400 && dfm == 0) {
+                    fcRxReset();
+                    fcRxSetActive(false);
+                    s_capWinMs = 0;
+                    s_capRetryMs = now + 120;
+                    s_rxResetN++;
+                    logMsg("[RX] 碎片风暴：1 秒 %u 次无效采集 / 0 帧有效 → 强复位采集链路\n",
+                           (unsigned)dfr);
+                }
             }
             s_lpMaxMs = 0;   // 每秒归零，网页看到的是「最近一秒」的最大卡顿
             // v32.24：飞控解码质量单独一行（每 5 秒），便于判断「跳色」是不是解码错帧
@@ -595,13 +640,20 @@ extern "C" void app_main(void) {
             s_capRetryMs = now + 200;           // 退避 200ms 再开窗
             s_capWinDrop++;
         }
-        if ((uint32_t)g_rxSeen != lastSeen) {
-            lastSeen = (uint32_t)g_rxSeen;
-            s_lastFcMs = now;          // 标定期间也要，免得退出标定误判超时
+        // v32.35【关键修正】「飞控还在不在」只能看**已经解出来的帧**（g_rxFrames），
+        // 不能看 ISR 进了多少次（g_rxSeen）—— 进 ISR 不代表解出帧，噪声碎片、
+        // 幽灵边沿都会让它涨。现场日志 `残片 732220 · 飞控静默 0s` 就是这个错：
+        // 噪声风暴里帧早就没了，可 s_lastFcMs 每秒被刷新几十上百次，于是
+        // 「1 秒超时灭灯」「3 秒自愈」「25 秒自动重启」三条保护**全部失效**，
+        // 画面就永远停在最后一帧上不动（用户看到的就是「彩虹突然卡住」）。
+        if ((uint32_t)g_rxFrames != lastFrames) {
+            lastFrames = (uint32_t)g_rxFrames;
+            s_lastFcMs = now;
         }
         if (pollFcInput(&frame)) {
             fcRxSetActive(false);      // 收到就把中断还回去：射频/按键都要它
             s_capWinMs = 0;
+            s_fcBlanked = false;       // v32.35：帧回来了，允许下次断线时重新灭灯
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();
@@ -621,13 +673,18 @@ extern "C" void app_main(void) {
         //    v32.29：光灭灯不够，还要**自愈**。现象「跑一段时间收不到飞控、重启就好」
         //    说明采集链路（中断/状态机）偶尔会卡住。现在连续 3 秒没帧就重挂一次
         //    GPIO 中断并把采集状态清干净，不用重启也能回来。
+        //    v32.35：超时后**先保持最后一帧**，别急着灭灯 —— 现场「彩虹突然卡住
+        //    然后全灭」里的「全灭」就是旧代码在 1 秒时直接清屏造成的。现在
+        //    1 秒只释放接管（画面冻住），2.5 秒确认真断了才灭灯。
         if (!s_calibrating && s_fcActive &&
             (now - s_lastFcMs) > FC_TIMEOUT_MS) {
             s_fcActive = false;
-            if (s_mode == 0) { // Betaflight：无信号灭灯
-                for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
-                refreshStrip();
-            } // 灯效模式：不灭灯，灯效渲染自然接管
+        }
+        if (s_mode == 0 && !s_calibrating && !s_fcActive && !s_fcBlanked &&
+            (now - s_lastFcMs) > FC_BLANK_MS) {
+            s_fcBlanked = true;        // 真断了：灭灯（只做一次，别每秒刷屏）
+            for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+            refreshStrip();
         }
         if (s_mode == 0 && (now - s_lastFcMs) > 3000) {
             if (fcLostLogMs == 0) {

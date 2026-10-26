@@ -579,15 +579,8 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     </span>
   </button>
 
-  <div class="stack">
-    <button class="pbtn" id="helpOpen2">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.3"/><path d="M12 17.2v.01"/>
-      </svg>
-      使用手册
-    </button>
-  </div>
-
+  <!-- v32.35：OTA 面板紧跟「固件升级」按钮，夹在按钮和「使用手册」之间。
+       用户反馈：点开后展开区出现在「使用手册」下面一行，视觉上跟按钮断开了。 -->
   <div class="card otabox" id="otabox">
     <h2>固件升级<span>WiFi OTA</span></h2>
     <label class="filepick" id="fwPick">
@@ -606,6 +599,15 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
       升级大约 10~30 秒，<b style="color:#e8734a">期间绝对不能断电</b>。写入失败会自动回滚到旧固件，不会变砖。
       完成后设备自动重启，热点会消失一两秒，需要重新连接。
     </div>
+  </div>
+
+  <div class="stack">
+    <button class="pbtn" id="helpOpen2">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.3"/><path d="M12 17.2v.01"/>
+      </svg>
+      使用手册
+    </button>
   </div>
 
   <div class="card">
@@ -1367,10 +1369,12 @@ function renderDev(j){
             "[RX  ] 存疑帧 " + (j.mis|0) + "（帧内出过断流/毛刺，那几帧颜色会错位）\n" +
             "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
                      "ns · 最长位 " + (j.gmax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
-            "[RX  ] 残片 " + (j.frag|0) + " · 幽灵边沿 " + (j.ghost|0) + " · 静默 " + (j.mute|0) +
-                     " · 自愈 " + (j.rxs|0) + " · 窗口超时 " + (j.capd|0) +
-                     " · 飞控静默 " + (j.sil|0) + "s" +
-                     ((j.sil|0) > 1 ? "（收不到飞控信号！）" : "") + "\n" +
+            "[RX  ] 残片 " + (j.frag|0) + "（短 " + (j.frs|0) + " · 长 " + (j.fro|0) +
+                     " · 线常高 " + (j.drp|0) + "）· 幽灵边沿 " + (j.ghost|0) +
+                     " · 静默 " + (j.mute|0) + " · 自愈 " + (j.rxs|0) +
+                     " · 窗口超时 " + (j.capd|0) + "\n" +
+            "[RX  ] 飞控静默 " + (j.sil|0) + "s（距上一帧**解出来**的帧，不是中断次数）" +
+                     ((j.sil|0) > 2 ? " —— 真收不到了！" : "") + "\n" +
             "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
             "[BOOT] " + (j.boot||"?") + "\n" +
             "[BOOT] 复位 " + rsn + lastSt;

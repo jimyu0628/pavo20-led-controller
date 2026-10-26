@@ -48,11 +48,21 @@
 // 160MHz 主频：1 cycle = 6.25ns
 #define CYC_TO_NS(c)      ((uint32_t)(c) * 25u / 4u)
 
-// 帧尾判定：低电平超过 50µs 认为一帧结束（WS2812 位间低最长 850ns，
-// Betaflight 帧间 reset 远大于 50µs）。
-#define FC_GAP_CYC        8000u
-// 进中断时线还是高（上升沿之后 1~2µs 内进来的）：等它变低的上限 25µs。
-#define FC_ENTRY_LOW_MAX_CYC  4000u
+// v32.35【帧尾判定的时间常数，这条改小了 8 倍，是治「彩虹跑几分钟突然卡住又全灭」的关键】
+//   老值 50µs（8000 cycle）。问题：中断只要判断不出「帧尾」，ISR 就得在那儿死等
+//   50µs 才收工。现场日志 `残片 732220` —— 这七十多万次残片，每次都是 ISR
+//   进来、抓到 1~23 个「位」、然后干等 50µs。732220 × 50µs ≈ 36 秒纯忙等，
+//   而且这 36 秒里**全局中断是关着的**（主循环、WiFi、蓝牙全被按停）。
+//   WS2812 位与位之间的低电平最长 850ns（这台飞控 925ns 周期时只有 700ns 左右），
+//   所以「低电平超过 6.25µs」已经绝不可能是正常位间间隔 —— 要么帧尾，要么噪声。
+//   6.25µs 足够把两种情况都识别出来，代价是忙等少 8 倍。
+#define FC_TAIL_CYC       1000u
+// 线被拉高（一直为高）的上限：25µs。真 1 码的高也只有 800ns 量级。
+#define FC_HI_MAX_CYC     4000u
+// 进中断时线还是高（上升沿之后 1~2µs 内进来的）：等它变低的上限 25µs → 7.5µs。
+// 噪声尖峰拉高的时间极短，7.5µs 完全够；老值 25µs 等于每来一个噪声尖峰
+// 就白等 25µs（WiFi 开着时 GPIO4 这根长线上一秒能有两三千个尖峰）。
+#define FC_ENTRY_LOW_MAX_CYC  1200u
 // 等「下一个上升沿」的上限：3µs。真数据位周期 1250ns，位间低最长 850ns ——
 // 3µs 内一定会有下一个上升沿。等不到说明这次中断不是一帧的起点。
 #define FC_ENTRY_RISE_CYC     480u
@@ -62,8 +72,13 @@
 #define FC_MIN_LOW_CYC        24u
 // 高电平短到物理上不可能（<150ns，真 0 码短则 220ns）→ 边沿振铃，整段丢弃
 #define FC_SPIKE_HI_CYC       24u
-// 连续多少次「幽灵边沿、且一个真帧都没收到」就静默 2 秒（防死机的最后一道闸）
-#define FC_GHOST_RUN_MAX      300u
+// 连续多少次「幽灵边沿、且一个真帧都没收到」就静默一下（防死机的最后一道闸）
+// v32.35：300 次 / 静默 2 秒 → 150 次 / 静默 0.3 秒。
+//   现场日志 `幽灵边沿 2812 · 静默 9` —— 9 × 300 = 2700，说明这道闸被噪声
+//   触发了 9 次；每次静默 2 秒 = **灯带瞎 2 秒**（而且这期间画面是冻着的）。
+//   0.3 秒足够让噪声风暴过去，肉眼几乎看不出来。
+#define FC_GHOST_RUN_MAX      150u
+#define FC_MUTE_CYC           48000000u   // 0.3s @160MHz
 // 单帧捕获硬上限：5ms
 #define FC_CAP_MAX_CYC    800000u
 // 默认位周期：200 cycle = 1250ns（WS2812 标准）。之后按实测自适应
@@ -133,7 +148,9 @@ volatile uint32_t g_rxSkip = 0;      // 保留字段
 volatile uint32_t g_rxBad = 0;       // 掺了毛刺/振铃的帧数（信号质量指标）
 volatile uint32_t g_rxClamp = 0;     // 保留（旧日志用）
 volatile uint32_t g_rxFrag = 0;      // 不足 1 颗灯 / 超长的残片，丢弃次数
-volatile uint32_t g_rxDropBits = 0;  // 最近一帧 cnt%24（正常应恒为 23，见文件头）
+volatile uint32_t g_rxShort = 0;     // v32.35：残片细分 —— 抓到的位不足 24（噪声碎片）
+volatile uint32_t g_rxOver = 0;      // v32.35：残片细分 —— 位数超过缓冲（跨帧粘在一起）
+volatile uint32_t g_rxDropBits = 0;  // 最近一帧 cnt%24（正常恒为 23，见文件头）
 volatile uint32_t g_rxGhost = 0;     // 「不是帧起点」的中断次数
 volatile uint32_t g_rxMute = 0;      // 因幽灵边沿太多而静默采集的次数
 volatile uint32_t g_rxSpike = 0;     // v32.29：被丢弃的振铃毛刺（累计）
@@ -169,10 +186,12 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
     // 会走到这里，把好帧的质量数据刷成 0。
     if (cnt < 24) {
         g_rxFrag = (uint32_t)(g_rxFrag + 1);
+        g_rxShort = (uint32_t)(g_rxShort + 1);
         return;
     }
     if (cnt > FC_MAX_BITS) {          // 超长（>64 颗）：缓冲装不下，整帧丢
         g_rxFrag = (uint32_t)(g_rxFrag + 1);
+        g_rxOver = (uint32_t)(g_rxOver + 1);
         return;
     }
 
@@ -284,7 +303,7 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
             if (++s_ghostRun >= FC_GHOST_RUN_MAX) {
                 s_ghostRun = 0;
                 g_rxMute = (uint32_t)(g_rxMute + 1);
-                s_muteUntilCyc = esp_cpu_get_cycle_count() + 320000000u; // 2s @160MHz
+                s_muteUntilCyc = esp_cpu_get_cycle_count() + FC_MUTE_CYC;
                 s_muteOn = true;   // v32.34：先定截止时间，再置标志
             }
             portEXIT_CRITICAL_ISR(&s_capMux);
@@ -314,18 +333,28 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         uint32_t tHiLast = tRise;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
             tHiLast = esp_cpu_get_cycle_count();
-            if (tHiLast - tRise > FC_GAP_CYC) goto cap_done;  // 线被拉高：异常收尾
+            if (tHiLast - tRise > FC_HI_MAX_CYC) goto cap_done;  // 线被拉高：异常收尾
         }
         uint32_t tFall = (tHiLast + esp_cpu_get_cycle_count()) / 2u;
         uint32_t hi = tFall - tRise;
         if (tFall - t0 > FC_CAP_MAX_CYC) goto cap_done;       // 整帧硬上限
 
-        // ---- 低电平段：等到下一个上升沿；超 50µs 就是帧尾 ----
+        // v32.35【噪声碎片就地掐掉】一帧的第一位，高电平必然 ≥ 220ns（0 码）。
+        // 进来时如果第一位的高短于 150ns，这只可能是射频噪声尖峰（WiFi 开到
+        // AP 模式后 GPIO4 这根长线上尖峰很多）。老代码会接着往下等「帧尾」，
+        // 每个尖峰白等 50µs；现在立刻走人，代价不到 1µs。
+        if (cnt == 0 && pendHi == 0 && hi < FC_SPIKE_HI_CYC) {
+            // 不计入「毛刺/异常帧」—— 那是帧内质量指标，被噪声灌满就没意义了。
+            // 它会计进「残片（短）」，日志里一眼能看出噪声有多吵。
+            goto cap_done;
+        }
+
+        // ---- 低电平段：等到下一个上升沿；超过 FC_TAIL_CYC(6.25µs) 就是帧尾 ----
         bool tail = false;
         uint32_t tLowEnd = tFall;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
             tLowEnd = esp_cpu_get_cycle_count();
-            if (tLowEnd - tFall > FC_GAP_CYC) { tail = true; break; }
+            if (tLowEnd - tFall > FC_TAIL_CYC) { tail = true; break; }
         }
         uint32_t lo = tLowEnd - tFall;
 

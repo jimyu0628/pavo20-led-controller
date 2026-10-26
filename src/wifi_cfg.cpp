@@ -149,7 +149,9 @@ static void sendState(httpd_req_t* req) {
              // v32.29：健康诊断
              "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
              "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u,"
-             "\"gap\":%u,\"gmax\":%u,\"lstg\":%d,\"lup\":%d}",
+             "\"gap\":%u,\"gmax\":%u,\"lstg\":%d,\"lup\":%d,"
+             // v32.35：残片细分（短=噪声碎片 / 长=跨帧粘连 / drp=线常高）
+             "\"frs\":%u,\"fro\":%u,\"drp\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -172,7 +174,8 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxSpike, (unsigned)g_rxMerge,
              (unsigned)g_rxNear, (unsigned)g_rxPeriodNs,
              (unsigned)g_rxGap, (unsigned)g_rxGapMaxNs,
-             webGetLastStage(), webGetLastUp());
+             webGetLastStage(), webGetLastUp(),
+             (unsigned)g_rxShort, (unsigned)g_rxOver, (unsigned)g_rxDrop);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);
