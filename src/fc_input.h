@@ -4,9 +4,10 @@
 //   - 接收 Betaflight LED strip 输出的 3.3V WS2812 时序
 //   - 每颗灯 24 bit，按下面的「通道顺序」还原成 RGB
 //   - 提供轮询接口：主循环每次调用 pollFcInput() 获取最新帧
-//   - 说明：ESP32-C3 RMT RX 每通道 48 符号上限、无 DMA，长帧（28 颗 = 672
+//   - 说明：ESP32-C3 RMT RX 每通道 48 符号上限、无 DMA，长帧（45 颗 = 1080
 //     符号）放不下，故改用 GPIO 上升沿中断 + ISR 忙等逐 bit 测宽。
-//     v32.24 起加入位周期一致性校验、整帧校验、自适应阈值（详见 .cpp）
+//     v32.26：采集期间屏蔽全部中断（否则位宽全是错的），帧尾按 24 对齐分组，
+//     取消整帧作废（详见 .cpp 头部注释）
 // ============================================================
 
 #include <stdint.h>
@@ -22,8 +23,15 @@ struct FcFrame {
 // 初始化软件解码（在 setup 中调用一次）
 void fcInputInit();
 
-// 轮询：若有通过校验的新帧则返回 true 并写入 out；坏帧会被丢弃并返回 false
+// 轮询：若有新帧则返回 true 并写入 out。
+// v32.26 起不再整帧丢弃（采集已可靠），只有「不足 1 颗灯」的残片会被丢掉
 bool pollFcInput(FcFrame* out);
+
+// v32.26：采集开关。只有 Betaflight 模式(0)或标定中才需要飞控帧 ——
+// 因为采集期间要屏蔽全部中断约 1.4ms，本地灯效运行时没必要付这个代价。
+// 主循环每轮设一次：fcRxSetActive(s_mode == 0 || s_calibrating);
+void fcRxSetActive(bool on);
+bool fcRxActive();
 
 // ---- v32.23：飞控一侧的通道顺序 ----
 // 板上 WS2812 常见的是 GRB，但飞控（Betaflight 的 ledstrip_grb_rgb 设置、
@@ -38,21 +46,23 @@ const char* fcRxOrderName();   // "GRB"/"RGB"/... 心跳日志用
 void fcRxHeadHex(char* buf, int buflen);
 
 // 诊断统计（主循环心跳打印用）
-extern volatile uint32_t g_rxFrames;   // 通过校验、已上屏的帧数
+extern volatile uint32_t g_rxFrames;   // 已上屏的帧数
 extern volatile uint32_t g_rxLastLeds; // 最近一帧解出的灯珠数
-extern volatile uint32_t g_rxDone;     // 帧头可信的接收次数
+extern volatile uint32_t g_rxDone;     // 进入 ISR 并开始采集的次数
 extern volatile uint32_t g_rxSyms;     // 累计解码 bit 数
-extern volatile uint32_t g_rxDrop;     // 帧头不可靠丢弃帧数
-extern volatile uint32_t g_rxFrameEnd; // 通过校验的帧数
+extern volatile uint32_t g_rxDrop;     // 线常高直接放弃的次数
+extern volatile uint32_t g_rxFrameEnd; // 收完整帧的总次数
 extern volatile uint32_t g_rxLedAtEnd; // 最近一次帧完成时的灯数
-extern volatile uint32_t g_rxBad;      // v32.24：数据异常整帧丢弃次数
-extern volatile uint32_t g_rxSeen;     // v32.24：判帧结束总次数（含坏帧）
-extern volatile uint32_t g_rxSkip;     // v32.24：空触发次数
-extern volatile uint32_t g_rxClamp;    // v32.25：高电平被中断拉长、强制判 0 的 bit 数
-extern volatile uint32_t g_rxFrag;     // v32.25：被打断的残片（<3 颗灯）静默丢弃次数
-extern volatile uint16_t g_rxHiMinNs;  // v32.24：最短高位（ns）
-extern volatile uint16_t g_rxHiMaxNs;  // v32.24：最长高位（ns）
-extern volatile uint16_t g_rxLoMaxNs;  // v32.24：最长低位（ns）
-extern volatile uint16_t g_rxThrNs;    // v32.24：自适应阈值（ns）
+extern volatile uint32_t g_rxBad;      // 帧内出现「高电平短到不可能」的帧数（干扰指标）
+extern volatile uint32_t g_rxSeen;     // 判帧结束总次数
+extern volatile uint32_t g_rxSkip;     // 保留字段
+extern volatile uint32_t g_rxClamp;    // 高电平被拉长、强制判 0 的 bit 数
+extern volatile uint32_t g_rxFrag;     // 不足 1 颗灯的残片，丢弃次数
+extern volatile uint32_t g_rxDropBits; // v32.26：最近一帧帧头丢掉的 bit 数（= cnt%24）
+extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）
+extern volatile uint16_t g_rxHiMaxNs;  // 最长高位（ns）
+extern volatile uint16_t g_rxLoMaxNs;  // 最长低位（ns）
+extern volatile uint16_t g_rxThrNs;    // 自适应判别阈值（ns）
+extern volatile uint16_t g_rxCapUs;    // v32.26：最近一帧捕获耗时（= 中断屏蔽时长 µs）
 bool fcRxOk();    // 解码是否初始化成功
 int  fcRxErr();   // 初始化失败错误码（0 = 无错误）

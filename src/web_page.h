@@ -1247,9 +1247,10 @@ function renderDev(j){
             "[MSP ] " + (j.msp||"?") + "\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
                      " · 末帧 " + (j.lend|0) + " 颗\n" +
-            "[RX  ] 坏帧 " + (j.bad|0) + " · 残片 " + (j.frag|0) + " · 修正位 " + (j.clamp|0) +
-                     " · 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
-                     "ns · 最长低位 " + (j.lomax|0) + "ns\n" +
+            "[RX  ] 异常帧 " + (j.bad|0) + " · 残片 " + (j.frag|0) + " · 强制位 " + (j.clamp|0) +
+                     " · 帧头丢 " + (j.dropb|0) + "bit\n" +
+            "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
+                     "ns · 最长低位 " + (j.lomax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;
 }

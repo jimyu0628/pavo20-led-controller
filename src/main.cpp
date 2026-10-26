@@ -167,12 +167,21 @@ static int currentRatio() {
     return 4;
 }
 // 飞控模式下收到帧即调用：按比例把飞控 LED 帧映射到灯带
+// 飞控实际灯数：取历史最大值。ISR 进入时帧头那一位必然采不到（中断延迟），
+// 所以单帧解出的灯数偶尔会比真实值少 1~2 颗；用峰值当基准，缺的尾部沿用
+// 最后一颗的颜色，避免灯带末端出现一小段黑。
+static int s_fcPeak = 0;
 static void mapFcToStrip(const FcFrame& frame) {
     int ratio = currentRatio();
-    int fc = frame.count;
+    int have = frame.count;
+    if (have <= 0) return;
+    if (have > s_fcPeak) s_fcPeak = have;
+    int fc = s_fcPeak;
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
-        s_strip[i] = (src < fc) ? frame.leds[src] : RGB();
+        if (src >= fc) { s_strip[i] = RGB(); continue; }  // 超出飞控灯数：灭
+        if (src >= have) src = have - 1;                  // 本帧偏短：尾部沿用最后一颗
+        s_strip[i] = frame.leds[src];
     }
     refreshStrip();
 }
@@ -387,13 +396,14 @@ extern "C" void app_main(void) {
                 lastRxLogMs = now;
                 char head[48];
                 fcRxHeadHex(head, sizeof(head));
-                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u frag=%u clamp=%u led=%u | hi=%u..%u lo=%u thr=%u ns | ord=%s head=%s\n",
+                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u frag=%u clamp=%u led=%u drop=%u | hi=%u..%u lo=%u thr=%u ns | cap=%uus ord=%s head=%s\n",
                        fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                        (uint32_t)g_rxFrames, (uint32_t)g_rxBad, (uint32_t)g_rxFrag,
-                       (uint32_t)g_rxClamp,
-                       (uint32_t)g_rxLastLeds,
+                       (uint32_t)g_rxClamp, (uint32_t)g_rxLastLeds,
+                       (uint32_t)g_rxDropBits,
                        (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
                        (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
+                       (unsigned)g_rxCapUs,
                        fcRxOrderName(), head);
             }
             lastTxTotal = cur;
@@ -413,6 +423,9 @@ extern "C" void app_main(void) {
         //    现在只有「飞控模式(0)」才把控制权交给飞控；标定仍需帧来数灯珠。
         // v32.24：飞控只要还在发帧就续上「存活」时间戳（哪怕那一帧因数据异常被
         // 整帧丢弃），否则连续几次坏帧会把「信号丢失」误判成真、把灯带灭掉。
+        // v32.26：只有 Betaflight 模式/标定时才开采集 —— 采集要屏蔽全部中断约 1.4ms，
+        // 用本地灯效时完全没必要付这个代价
+        fcRxSetActive(s_mode == 0 || s_calibrating);
         if ((uint32_t)g_rxSeen != lastSeen) {
             lastSeen = (uint32_t)g_rxSeen;
             s_lastFcMs = now;          // 标定期间也要，免得退出标定误判超时

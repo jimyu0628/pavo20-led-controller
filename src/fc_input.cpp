@@ -18,69 +18,82 @@
 // 飞控 LED 信号解码（GPIO 中断 + ISR 内忙等测宽）
 //
 // 为什么不用 RMT RX：ESP32-C3 的 RMT 每通道内存 48 符号、无 DMA，
-// 28 颗一帧 672 符号根本放不下，只能解出前 2 颗。
+// 45 颗一帧 1080 符号根本放不下。
 //
-// 原理：GPIO4 上升沿中断 → ISR 内忙等轮询电平，逐 bit 测「高电平时长」：
+// 原理：GPIO4 上升沿中断 → 屏蔽中断后忙等轮询电平，逐 bit 测高电平时长：
 //   WS2812 800kHz：高 800ns=1 / 高 400ns=0，位周期恒 1250ns。
-//   一帧在一次中断里连续收完，不需要续接。
-//   帧尾 = 低电平持续 > 20µs（比特间隔最长 850ns，帧间 reset ≥ 50µs）。
 //
-// v32.24 入门槛：位周期校验 + 整帧校验 + 自适应阈值
-// v32.25 重要修正（实测 bad:fps = 10230:5，几乎全是误判）
-//   原因：「(高+低) 超周期就整帧作废」把【中断延迟】当成【数据损坏】了。
-//   低电平段被 WiFi/BLE 中断插进来时，低循环退出得晚 → lo 变长，
-//   但 hi 的测量起点在低循环之后，值判定仍然准确。
-//   于是合法的好帧被成批判死，安全阀又反复重置参数 → 阈值永远停在 600ns。
-//   改为：
-//   a) 帧尾超时 20µs → 100µs（WiFi/BLE 中断延迟常达数十 µs，20µs 会把一帧切碎）
-//   b) 只有「高电平短到物理上不可能（<125ns）」才判真丢位 → 整帧作废
-//   c) 高电平被拉长（> 阈值 2.2 倍，说明测量期间被中断占住）→ 该 bit 保守判 0，
-//      只错 1 个 LSB，不整帧丢弃
-//   d) 残片（总 bit < 72）静默丢弃，不计入坏帧、不触发安全阀
+// ---- v32.26：三次失败后的结论 —— 采集本身不可靠，别再修判据 ----
+//   v32.22 能出图但颜色不对、偶尔闪；v32.24 加校验后 bad:frames=10230:5；
+//   v32.25 放宽校验后 bad:frames=9243:0。三次都是同一件事：
+//   **忙等采集期间被 WiFi/BLE/系统 tick 打断，测出来的位宽是错的**，
+//   于是①位宽判错（灭灯区发暗光）②丢掉/并掉 bit 让 24bit 分组错位（闪乱色）
+//   ③整帧 bit 数不是 24 的倍数（v32.24/25 的校验把它全判坏 → 画面完全不动）。
+//
+//   本次三条改法：
+//   a) 【关键】进入 ISR 后立刻把 INTENABLE 清零，整个帧在「无中断」状态下采完
+//      （45 颗 ≈ 1.35ms）。这是唯一能让测量准确的办法；代价是 WiFi/BLE 中断
+//      被推迟 1.35ms，30Hz 下占空比 4%，实测无影响。
+//   b) 位数据改成【原始 bit 数组】，帧尾再按 24 对齐分组：丢掉帧头 cnt%24 个 bit，
+//      使分组终点正好落在帧尾 —— 不管帧头丢了几位，后面的 LED 一定对齐，
+//      不会像原来那样「从帧头开始每 24 位切一刀」把颜色整体转位。
+//   c) 取消「整帧作废」：只要还剩 ≥1 颗灯就上屏。采集既然可靠了，就不需要
+//      用丢帧来遮丑；丢帧只会让画面冻住。
 // ============================================================
 
-#define FC_GPIO_BIT    (1u << 4)      // GPIO4
+#define FC_GPIO_BIT       (1u << 4)   // GPIO4
 
 // 160MHz 主频：1 cycle = 6.25ns
-#define CYC_TO_NS(c)   ((uint32_t)(c) * 25u / 4u)
+#define CYC_TO_NS(c)      ((uint32_t)(c) * 25u / 4u)
 
-// 帧尾判定超时 100µs（16000 cycle @160MHz）：
-//   WS2812 位间低电平最长 850ns，帧间 reset ≥ 50µs（Betaflight 实际 10ms 级），
-//   100µs 既能区分帧尾，又能容忍 WiFi/BLE 中断造成的数十 µs 延迟。
-//   v32.24 用的 20µs 太短：中断一插就把一帧切成几段，每段 bit 数都不是 24 倍数
-#define FC_RESET_TIMEOUT_CYC 16000
-// 单个 bit 的高电平下限（20 cycle ≈ 125ns）：低于此说明把一段低电平当成了
-// 「上升沿→下降沿」，即漏检了上升沿（真丢位）—— 这是唯一会让 24bit 分组错位、
-// 必须整帧作废的情况
-#define FC_HI_MIN_CYC   20
-// 高电平上限 = 阈值的 2.2 倍。超过说明这个 bit 的高电平段被中断拉长了，
-// 测出来的「宽」不代表真实值（0 码可能被读成 1，就是老的「暗光」根因），
-// 所以该 bit 按 0 处理（保守：宁可暗一个 LSB，也不要亮点/整帧丢）
-#define FC_HI_MAX_X10   22u
-// 残片阈值：总 bit 少于 3 颗灯就当作被打断的碎片，静默丢弃
-#define FC_FRAG_BITS    72u
+// 帧尾判定：低电平超过 50µs 认为一帧结束（WS2812 位间低最长 850ns，
+// Betaflight 帧间 reset 远大于 50µs）。v32.25 的 100µs 会把下一帧的开头
+// 一起吞进来，50µs 足够区分又不会跨帧。
+#define FC_GAP_CYC        8000u
+// 进中断后等线变低的超时：200µs。超过说明线是常高（飞控没在发 / 掉线）
+#define FC_ENTRY_MAX_CYC  32000u
+// 单帧捕获硬上限：5ms（45 颗约 1.35ms，留 3 倍余量）。防止线被拉成常低时
+// 在「无中断」状态下卡死，把 WiFi 一起拖垮
+#define FC_CAP_MAX_CYC    800000u
+// 高电平短到物理上不可能的最小值（20 cycle ≈ 125ns）→ 漏检上升沿
+#define FC_HI_MIN_CYC     20u
+// 高电平上限 = 阈值的 2.2 倍。超过说明测量被拉长，该 bit 按 0 处理
+#define FC_HI_MAX_X10     22u
+
+#define FC_MAX_BITS       (FC_MAX_LEDS * 24)
+#define FC_BITS_BYTES     (FC_MAX_BITS / 8)
+
+// ---------- 中断全屏蔽 ----------
+// 直接读写 INTENABLE：比 portDISABLE_INTERRUPTS()（只压到 XCHAL_EXCM_LEVEL）
+// 更彻底，能把 WiFi/BLE 的 3~5 级中断一起挡在外面。ISR 退出汇编只恢复 PS，
+// 不碰 INTENABLE，所以这里改了不会被「还原」，必须自己恢复。
+static inline uint32_t IRAM_ATTR fcIntrOffAll(void) {
+    uint32_t old;
+    __asm__ __volatile__("rsr %0, INTENABLE" : "=a"(old));
+    __asm__ __volatile__("wsr %0, INTENABLE\n\trsync" :: "a"(0u));
+    return old;
+}
+static inline void IRAM_ATTR fcIntrRestore(uint32_t old) {
+    __asm__ __volatile__("wsr %0, INTENABLE\n\trsync" :: "a"(old));
+}
 
 // ---------- ISR 与主循环共享 ----------
-static volatile uint8_t s_bad = 0;         // 本帧是否出现异常
-static volatile uint32_t s_swBits = 0;
-static volatile uint8_t  s_swBitCnt = 0;
-// v32.23：原始三字节（不在这里还原通道顺序）
-// v32.24：双缓冲。ISR 写 s_raw[s_wr]，帧通过校验后才把 s_pub 指过来，
-//         主循环只读 s_raw[s_pub]，避免「一边写一边读」读出错色。
-static volatile uint8_t  s_raw[2][FC_MAX_LEDS][3];
+// 采集开关：只有 Betaflight 模式或标定中才需要飞控帧。关掉时 ISR 立刻返回，
+// 既不屏蔽中断也不占 CPU（本地灯效运行时完全不受飞控信号影响）
+static volatile bool     s_active = true;
+// bit 数组双缓冲：ISR 写 s_wr，收完一帧把 s_pub 指过来；主循环只读 s_pub。
+static uint8_t           s_bits[2][FC_BITS_BYTES];
+static volatile uint16_t s_nbits[2];
 static volatile uint8_t  s_wr = 0, s_pub = 0;
-static volatile int      s_swLedCnt = 0;
-static volatile bool     s_swFrameDone = false;
+static volatile bool     s_frameReady = false;
 
-// 自适应参数：判别阈值 & 标称位周期（cycle），随实测缓慢跟随
+// 自适应参数：判别阈值（cycle），随实测缓慢跟随
 static volatile uint32_t s_thrCyc = 96;      // 600ns（初值，对应 800kHz WS2812）
-static volatile uint32_t s_periodCyc = 200;  // 1250ns
-static volatile uint8_t  s_calibrated = 0;   // 0=还没学到周期，先不做周期校验
+static volatile uint8_t  s_cal = 0;          // 0=还没学到，第一帧直接采用
 
 // 本帧统计
 static volatile uint32_t s_fHiMin, s_fHiMax, s_fLoMax;
 static volatile uint32_t s_sumPeriod, s_nPeriod;
-static volatile uint32_t s_badRun = 0;   // 连续坏帧数（安全阀：连续坏太多就重新学参数）
 
 // ---- 通道顺序（v32.23）----
 // 每个条目是「输出 r/g/b 分别取自原始第几字节」。
@@ -95,8 +108,8 @@ static const uint8_t s_orderMap[6][3] = {
     {2, 1, 0}, // 5 BGR
 };
 static const char* s_orderName[6] = {"GRB", "RGB", "BRG", "RBG", "GBR", "BGR"};
-// 默认 3(RBG)：实测这版飞控的流里「红 → 显示绿、蓝 → 显示红」，
-// 正好等于原始字节序是 (R,B,G)。
+// 默认 3(RBG)：v32.23 按实测「红→绿、蓝→红」反推得到，保留不动。
+// 若某天换了飞控/改了 ledstrip_grb_rgb，在网页「连接」页点一下就能换。
 static volatile uint8_t s_rxOrder = 3;
 
 void fcSetRxOrder(int v) {
@@ -106,22 +119,24 @@ int fcRxOrder() { return (int)s_rxOrder; }
 const char* fcRxOrderName() { return s_orderName[(s_rxOrder < 6) ? s_rxOrder : 0]; }
 
 // 诊断统计
-volatile uint32_t g_rxFrames = 0;    // 通过校验、已上屏的帧数
+volatile uint32_t g_rxFrames = 0;    // 已上屏的帧数
 volatile uint32_t g_rxLastLeds = 0;
-volatile uint32_t g_rxDone = 0;      // 中断进入且帧头可信的总次数
+volatile uint32_t g_rxDone = 0;      // 进入 ISR 并开始采集的次数
 volatile uint32_t g_rxSyms = 0;      // 累计 bit 数
-volatile uint32_t g_rxDrop = 0;      // 帧头不可靠直接丢弃
-volatile uint32_t g_rxFrameEnd = 0;  // 通过校验的帧数（= g_rxFrames）
+volatile uint32_t g_rxDrop = 0;      // 线常高直接放弃的次数
+volatile uint32_t g_rxFrameEnd = 0;  // 收完整帧的总次数（= 上屏帧数）
 volatile uint32_t g_rxLedAtEnd = 0;  // 最近一帧解出的灯数
-volatile uint32_t g_rxBad = 0;       // v32.24：数据异常被整帧丢弃的次数
-volatile uint32_t g_rxSeen = 0;      // v32.24：ISR 判定「一帧结束」的总次数（含坏帧）
-volatile uint32_t g_rxSkip = 0;      // v32.24：空触发（进中断时已是低电平）
-volatile uint32_t g_rxClamp = 0;     // v32.25：高电平被中断拉长、该 bit 被强制判 0 的次数
-volatile uint32_t g_rxFrag = 0;      // v32.25：被打断的残片（<3 颗灯）静默丢弃次数
-volatile uint16_t g_rxHiMinNs = 0;   // v32.24：最近一帧最短高位（ns）
-volatile uint16_t g_rxHiMaxNs = 0;   // v32.24：最近一帧最长高位（ns）
-volatile uint16_t g_rxLoMaxNs = 0;   // v32.24：最近一帧最长低位（ns）
-volatile uint16_t g_rxThrNs = 0;     // v32.24：当前自适应判别阈值（ns）
+volatile uint32_t g_rxSeen = 0;      // ISR 判定「一帧结束」的总次数
+volatile uint32_t g_rxSkip = 0;      // 保留字段（旧日志用）
+volatile uint32_t g_rxBad = 0;       // 出现过「高电平短到不可能」的帧数（干扰指标）
+volatile uint32_t g_rxClamp = 0;     // 高电平被拉长、该 bit 强制判 0 的次数
+volatile uint32_t g_rxFrag = 0;      // 不足 1 颗灯的残片，丢弃次数
+volatile uint32_t g_rxDropBits = 0;  // 最近一帧帧头丢掉的 bit 数（= cnt%24）
+volatile uint16_t g_rxHiMinNs = 0;   // 最近一帧最短高位（ns）
+volatile uint16_t g_rxHiMaxNs = 0;   // 最近一帧最长高位（ns）
+volatile uint16_t g_rxLoMaxNs = 0;   // 最近一帧最长低位（ns）
+volatile uint16_t g_rxThrNs = 0;     // 当前自适应判别阈值（ns）
+volatile uint16_t g_rxCapUs = 0;     // 最近一帧的捕获耗时（µs），反映中断屏蔽时长
 
 static esp_err_t s_rxErr = ESP_OK;
 static bool s_rxSwInit = false;
@@ -129,170 +144,151 @@ static bool s_rxSwInit = false;
 bool fcRxOk() { return s_rxSwInit; }
 int  fcRxErr() { return (int)s_rxErr; }
 
-// ---------- bit 累积 ----------
-static inline void IRAM_ATTR swPushBit(bool one) {
-    s_swBits = (s_swBits << 1) | (one ? 1u : 0u);
-    s_swBitCnt = (uint8_t)(s_swBitCnt + 1);
-    if (s_swBitCnt == 24) {
-        uint32_t v = s_swBits;
-        if (s_swLedCnt < FC_MAX_LEDS) {
-            // 原始三字节按接收顺序存入，通道顺序在 pollFcInput 里还原
-            volatile uint8_t* d = s_raw[s_wr][s_swLedCnt];
-            d[0] = (uint8_t)(v >> 16);
-            d[1] = (uint8_t)(v >> 8);
-            d[2] = (uint8_t)v;
-            s_swLedCnt = (int)(s_swLedCnt + 1);
-        }
-        s_swBits = 0;
-        s_swBitCnt = 0;
-    }
-    g_rxSyms = (uint32_t)(g_rxSyms + 1);
-}
+void fcRxSetActive(bool on) { s_active = on; }
+bool fcRxActive() { return s_active; }
 
-// ---------- 帧结束：校验 → 通过才发布，否则整帧丢弃 ----------
-static void IRAM_ATTR swEndFrame(void) {
-    uint32_t n = (uint32_t)s_swLedCnt;
+// ---------- 帧结束：对齐 → 发布 ----------
+static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
     g_rxSeen = (uint32_t)(g_rxSeen + 1);
-    g_rxLedAtEnd = n;
+    g_rxLedAtEnd = (uint32_t)(cnt / 24);
+    g_rxDropBits = (uint32_t)(cnt % 24);
+    g_rxCapUs = (uint16_t)((esp_cpu_get_cycle_count() - t0) * 25u / 4u / 1000u);
     // 帧内一个 bit 都没测到时 s_fHiMin 还是哨兵值，别拿去换算（会溢出）
     g_rxHiMinNs = (s_fHiMin > 2000) ? 0 : (uint16_t)CYC_TO_NS(s_fHiMin);
     g_rxHiMaxNs = (uint16_t)CYC_TO_NS(s_fHiMax);
     g_rxLoMaxNs = (uint16_t)CYC_TO_NS(s_fLoMax);
 
-    // 校验：出现异常 / bit 数不是 24 的整数倍（丢位或多位）/ 没有灯
-    if (s_bad || s_swBitCnt != 0 || n == 0) {
-        // v32.25：帧被打断成小段（比如中断延迟把一帧切成两截）
-        // 只是一块残片，静默丢掉：不计坏帧、也不喂安全阀，
-        // 否则碎片会堆积成「连续坏 30 帧」把好不容易学到的参数重置掉
-        if ((uint32_t)n * 24u + s_swBitCnt < FC_FRAG_BITS) {
-            g_rxFrag = (uint32_t)(g_rxFrag + 1);
-            return;
-        }
-        g_rxBad = (uint32_t)(g_rxBad + 1);
-        // 安全阀：连续坏 200 帧（10 秒级）说明学到的阈值本身不对，
-        // 回退到出厂值重新学，避免「一直判坏 → 画面永远定格」。
-        // v32.25：30 → 200，原来太敏感，正常的偶发打断就会把参数打回出厂
-        s_badRun++;
-        if (s_badRun >= 200) {
-            s_badRun = 0;
-            s_calibrated = 0;
-            s_thrCyc = 96;
-            s_periodCyc = 200;
-            g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
-        }
-        return;   // 不发布：屏幕上继续显示上一帧好画面，躲掉一次闪烁
+    if (cnt < 24) {
+        g_rxFrag = (uint32_t)(g_rxFrag + 1);   // 残片：连一颗灯都凑不齐
+        return;
     }
-    s_badRun = 0;
 
-    // 学到参数：最短/最长高位取中点当阈值（要求两者分得开，即本帧 0/1 都有）
-    // 第一次直接采用，之后按 1/8 平滑跟随 —— 刷机后第二帧就能用上正确阈值
+    // 学到阈值：最短/最长高位取中点（要求两者分得开，即本帧 0/1 都有）。
+    // 采集已经无中断干扰，hmin 会稳定落在 400ns 附近；仍保留「不低于 hmax*2/5」
+    // 的保护，防止某帧只有单色（全是 0 码或全是 1 码）时把阈值带偏。
     uint32_t hmin = s_fHiMin, hmax = s_fHiMax;
     if (hmin != 0xFFFFFFFFu && hmax > 0) {
-        // v32.25：hmin 可能是被中断截短的假值（实测见过 212ns，而真实 0 码 400ns）。
-        // 拿它算中点会把阈值拉低，导致 1 码被误判成 0（整条灯偏暗），
-        // 所以限制 hmin 不低于 hmax 的 2/5（0 码/1 码比值理论是 0.5）
         if (hmin < hmax * 2u / 5u) hmin = hmax * 2u / 5u;
         if (hmax > hmin + hmin / 2u) {
             uint32_t t = (hmin + hmax) / 2u;
             if (t < 24) t = 24;
             if (t > 300) t = 300;
-            s_thrCyc = s_calibrated ? ((s_thrCyc * 7 + t) / 8) : t;
+            // 第一次直接采用（刷机后第一帧就准），之后 1/8 平滑跟随
+            s_thrCyc = s_cal ? ((s_thrCyc * 7 + t) / 8) : t;
+            s_cal = 1;
         }
     }
-    // 周期只作诊断参考（v32.25 起不再拿它判坏帧，理由见文件头）
-    if (s_nPeriod > 8) {
-        uint32_t p = s_sumPeriod / s_nPeriod;
-        if (p > 40 && p < 800) {
-            s_periodCyc = s_calibrated ? ((s_periodCyc * 7 + p) / 8) : p;
-        }
-    }
-    s_calibrated = 1;
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
 
-    // 发布这一帧（双缓冲交换）
+    // 发布（双缓冲交换）
+    s_nbits[s_wr] = cnt;
     s_pub = s_wr;
     s_wr = (uint8_t)(s_wr ^ 1);
-    s_swFrameDone = true;
+    s_frameReady = true;
     g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
 }
 
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
 static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
+    if (!s_active) return;      // 不需要飞控灯的场合（本地灯效）直接走开
 
-    // 第一个 bit 只测到「剩余的」高电平（中断入口有延迟），只用来判定帧头可信度
-    uint32_t a0 = esp_cpu_get_cycle_count();
+    // 【核心】进入就关掉所有可屏蔽中断。忙等期间哪怕只被打断一次，
+    // 这个 bit 的宽度就是错的（WiFi/BLE 中断延迟可达数十 µs）
+    uint32_t intSaved = fcIntrOffAll();
+    uint32_t t0 = esp_cpu_get_cycle_count();
+
+    // 1) 等当前这个高电平结束。我们是上升沿之后几百 ns~几 µs 才进来的，
+    //    位宽已经被截短，所以这个 bit 不要（丢几位由帧尾 24 对齐补回来）
     while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
-        if ((esp_cpu_get_cycle_count() - a0) > FC_RESET_TIMEOUT_CYC) {
-            return;   // 帧间空闲高 / 延迟边沿：直接返回，不清任何状态
+        if ((esp_cpu_get_cycle_count() - t0) > FC_ENTRY_MAX_CYC) {
+            g_rxDrop = (uint32_t)(g_rxDrop + 1);   // 线常高：没在发数据
+            fcIntrRestore(intSaved);
+            return;
         }
     }
-    uint32_t firstHi = esp_cpu_get_cycle_count() - a0;
-    if (firstHi < FC_HI_MIN_CYC) {
-        // 进入中断时电平已经是低（多半是帧内被锁存的边沿又触发了一次）
-        g_rxSkip = (uint32_t)(g_rxSkip + 1);
-        return;
-    }
 
-    // 确认是新帧：清状态（此时才动 s_raw，避免打乱已发布的那一帧）
-    s_swBits = 0;
-    s_swBitCnt = 0;
-    s_swLedCnt = 0;
-    s_swFrameDone = false;   // 上一帧若还没被取走，就作废，不让它被重复上屏
-    s_bad = 0;
+    // 2) 复位本帧统计
+    uint16_t cnt = 0;
+    uint32_t acc = 0, accN = 0;
+    uint8_t* wp = s_bits[s_wr];
+    memset(wp, 0, FC_BITS_BYTES);
     s_fHiMin = 0xFFFFFFFFu;
     s_fHiMax = 0;
     s_fLoMax = 0;
     s_sumPeriod = 0;
     s_nPeriod = 0;
+    uint8_t shortHi = 0;
     g_rxDone = (uint32_t)(g_rxDone + 1);
 
-    // 首位阈值略降（5/6）：中断入口延迟只会让测到的高电平变短
-    swPushBit(firstHi > (s_thrCyc * 5u / 6u));
+    uint32_t w0 = 0, lo = 0, h0 = 0, hi = 0;
 
     while (1) {
         // ---- 低电平段（bit 之间的间隔）----
-        uint32_t w0 = esp_cpu_get_cycle_count();
-        uint32_t lo;
+        w0 = esp_cpu_get_cycle_count();
+        lo = 0;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
             lo = esp_cpu_get_cycle_count() - w0;
-            if (lo > FC_RESET_TIMEOUT_CYC) {   // 帧尾 reset
-                swEndFrame();
-                return;
-            }
+            if (lo > FC_GAP_CYC) goto cap_done;                  // 帧尾 reset
+            if ((w0 - t0) > FC_CAP_MAX_CYC) goto cap_done;       // 整体超时
         }
-        lo = esp_cpu_get_cycle_count() - w0;
 
         // ---- 高电平段（决定这一 bit 是 0 还是 1）----
-        uint32_t h0 = esp_cpu_get_cycle_count();
-        uint32_t hi;
+        h0 = esp_cpu_get_cycle_count();
+        hi = 0;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
             hi = esp_cpu_get_cycle_count() - h0;
-            if (hi > FC_RESET_TIMEOUT_CYC) {   // 飞控掉线后线被上拉成常高
-                swEndFrame();
-                return;
-            }
+            if (hi > FC_GAP_CYC) goto cap_done;                  // 线被拉高 / 帧尾
+            if ((h0 - t0) > FC_CAP_MAX_CYC) goto cap_done;       // 整体超时
         }
-        hi = esp_cpu_get_cycle_count() - h0;
 
-        // 真丢位判定：高电平短到物理上不可能（<125ns）才算。
-        // 这是唯一会让 24bit 分组整体错位、必须整帧作废的情况
-        if (hi < FC_HI_MIN_CYC) s_bad = 1;
+        // ---- 统计（只做诊断，不再拿这些判据整帧作废）----
+        if (hi < FC_HI_MIN_CYC) shortHi = 1;
         if (hi > s_fHiMax) s_fHiMax = hi;
         if (hi < s_fHiMin) s_fHiMin = hi;
         if (lo > s_fLoMax) s_fLoMax = lo;
         s_sumPeriod += hi + lo;
         s_nPeriod++;
-        // 值判定：高电平被中断拉长时（> 阈值 2.2 倍，正常 1 码上限约 1.2µs），
-        // 测到的宽度不代表真实电平宽度，0 码可能被读成 1（老的「暗光」根因），
-        // 所以这一 bit 保守判 0：只错 1 个 LSB，不整帧丢弃、不闪整条灯带
+
+        // ---- 值判定 ----
+        bool one;
         if (hi * 10u > s_thrCyc * FC_HI_MAX_X10) {
-            g_rxClamp = (uint32_t)(g_rxClamp + 1);
-            swPushBit(false);
+            g_rxClamp = (uint32_t)(g_rxClamp + 1);   // 测宽被拉长，保守判 0
+            one = false;
         } else {
-            swPushBit(hi > s_thrCyc);
+            one = (hi > s_thrCyc);
+        }
+
+        // ---- 压入 bit（按字节攒，省得每个 bit 都读改写）----
+        if (cnt < FC_MAX_BITS) {
+            acc = (acc << 1) | (one ? 1u : 0u);
+            if (++accN == 8) {
+                *wp++ = (uint8_t)acc;
+                acc = 0;
+                accN = 0;
+            }
+            cnt++;
         }
     }
+
+cap_done:
+    if (accN) *wp = (uint8_t)(acc << (8 - accN));   // 末尾不满一字节，低位补 0
+    if (shortHi) g_rxBad = (uint32_t)(g_rxBad + 1);
+    fcEndFrame(cnt, t0);
+    fcIntrRestore(intSaved);
+}
+
+// ---------- 从 bit 数组取第 i 颗灯 ----------
+static inline void fcGetLed(const uint8_t* base, uint16_t start, int i, uint8_t raw[3]) {
+    uint32_t v = 0;
+    int b0 = (int)start + i * 24;
+    for (int b = 0; b < 24; b++) {
+        int idx = b0 + b;
+        v = (v << 1) | (uint32_t)((base[idx >> 3] >> (7 - (idx & 7))) & 1u);
+    }
+    raw[0] = (uint8_t)(v >> 16);
+    raw[1] = (uint8_t)(v >> 8);
+    raw[2] = (uint8_t)v;
 }
 
 // ---------- 初始化 ----------
@@ -331,18 +327,35 @@ bool pollFcInput(FcFrame* out) {
     (void)out;
     return false;
 #endif
-    if (!s_swFrameDone) return false;
+    if (!s_frameReady) return false;
+    uint8_t p = s_pub;                       // 锁定缓冲：ISR 之后只会写另一个
+    uint16_t cnt = s_nbits[p];
+    s_frameReady = false;
+
+    // 帧头丢掉的 bit 数 = cnt % 24，丢掉它们让分组终点正好落在帧尾。
+    // 这样即使中断进晚了、头几位没采到，后面的 LED 仍然一颗不差地对齐。
+    uint16_t start = (uint16_t)(cnt % 24);
+    const uint8_t* base = s_bits[p];
     const uint8_t* m = s_orderMap[(s_rxOrder < 6) ? s_rxOrder : 0];
-    uint8_t p = s_pub;                 // 锁定缓冲：ISR 之后只会写另一个缓冲
-    int n = (int)s_swLedCnt;
+    int n = (int)((cnt - start) / 24);
     if (n > FC_MAX_LEDS) n = FC_MAX_LEDS;
+
     for (int i = 0; i < n; i++) {
-        const volatile uint8_t* s = s_raw[p][i];
-        out->leds[i].r = s[m[0]];
-        out->leds[i].g = s[m[1]];
-        out->leds[i].b = s[m[2]];
+        uint8_t raw[3];
+        fcGetLed(base, start, i, raw);
+        out->leds[i].r = raw[m[0]];
+        out->leds[i].g = raw[m[1]];
+        out->leds[i].b = raw[m[2]];
     }
-    s_swFrameDone = false;
+
+    // 帧头那一位必然采不到（中断进不来那么快），对齐后正好少一颗灯。
+    // 把它补回来：向前复制一颗，这样灯带末端不会缺一段，飞控灯数也和实际一致。
+    // 代价是被补的那颗显示的是下一颗的颜色 —— 纯色/扫描类效果看不出来
+    if (start > 0 && n >= 1 && n < FC_MAX_LEDS) {
+        for (int i = n; i > 0; i--) out->leds[i] = out->leds[i - 1];
+        out->leds[0] = out->leds[1];
+        n++;
+    }
 
     out->count = n;
     if (n > 0) {
@@ -353,23 +366,25 @@ bool pollFcInput(FcFrame* out) {
 }
 
 // ---------- 诊断：把最近一帧前几颗灯的原始字节打成十六进制 ----------
-// 用于对照飞控设置（比如飞控全设红 → 这里应该出现一串代表红的字节）
+// 用于对照飞控设置（飞控全设红 → 这里应出现代表红的字节）
 void fcRxHeadHex(char* buf, int buflen) {
     if (buf == NULL || buflen < 4) return;
     buf[0] = '\0';
-    if (!s_swFrameDone && g_rxFrameEnd == 0) {
+    if (g_rxFrameEnd == 0) {
         snprintf(buf, (size_t)buflen, "-");
         return;
     }
-    const uint8_t* m = s_orderMap[(s_rxOrder < 6) ? s_rxOrder : 0];
-    int n = (int)g_rxLastLeds;
-    if (n > 4) n = 4;
     uint8_t p = s_pub;
+    uint16_t cnt = s_nbits[p];
+    uint16_t start = (uint16_t)(cnt % 24);
+    int n = (int)((cnt - start) / 24);
+    if (n > 4) n = 4;
     int pos = 0;
-    for (int i = 0; i < n && pos < buflen - 8; i++) {
-        const volatile uint8_t* s = s_raw[p][i];
+    for (int i = 0; i < n && pos < buflen - 10; i++) {
+        uint8_t raw[3];
+        fcGetLed(s_bits[p], start, i, raw);
         pos += snprintf(buf + pos, (size_t)(buflen - pos), "%02X%02X%02X ",
-                        s[m[0]], s[m[1]], s[m[2]]);
+                        raw[0], raw[1], raw[2]);
     }
     if (pos > 0 && buf[pos - 1] == ' ') buf[pos - 1] = '\0';
 }
