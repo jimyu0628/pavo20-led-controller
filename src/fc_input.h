@@ -48,6 +48,8 @@ extern volatile uint32_t g_rxLedAtEnd; // 最近一次帧完成时的灯数
 extern volatile uint32_t g_rxBad;      // v32.24：数据异常整帧丢弃次数
 extern volatile uint32_t g_rxSeen;     // v32.24：判帧结束总次数（含坏帧）
 extern volatile uint32_t g_rxSkip;     // v32.24：空触发次数
+extern volatile uint32_t g_rxClamp;    // v32.25：高电平被中断拉长、强制判 0 的 bit 数
+extern volatile uint32_t g_rxFrag;     // v32.25：被打断的残片（<3 颗灯）静默丢弃次数
 extern volatile uint16_t g_rxHiMinNs;  // v32.24：最短高位（ns）
 extern volatile uint16_t g_rxHiMaxNs;  // v32.24：最长高位（ns）
 extern volatile uint16_t g_rxLoMaxNs;  // v32.24：最长低位（ns）

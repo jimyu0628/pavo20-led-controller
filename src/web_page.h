@@ -252,6 +252,35 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
        background:#131317;border-radius:8px;padding:7px 9px;line-height:1.55;margin-top:10px}
   .tip b{color:var(--amber);font-weight:600}
 
+  /* ===== 固件升级入口：设备页主视觉，一眼就要看到 ===== */
+  .otacard{position:relative;display:flex;align-items:center;gap:12px;width:100%;
+           margin:0 0 10px;padding:13px;border-radius:14px;cursor:pointer;
+           font-family:inherit;text-align:left;overflow:hidden;
+           border:1.5px solid #7c5618;
+           background:linear-gradient(135deg,#2f2109 0%,#1f1607 52%,#2d200b 100%);
+           box-shadow:0 8px 22px rgba(240,160,60,.15),inset 0 1px 0 rgba(255,214,150,.12);
+           transition:border-color .15s,box-shadow .15s,transform .12s}
+  .otacard::before{content:"";position:absolute;left:-30%;top:-130%;width:170%;height:230%;
+                   background:radial-gradient(closest-side,rgba(255,196,110,.17),transparent 72%);
+                   pointer-events:none}
+  .otacard:active{transform:scale(.985)}
+  .otacard .oi{position:relative;width:44px;height:44px;flex:0 0 auto;border-radius:13px;
+               display:flex;align-items:center;justify-content:center;
+               background:linear-gradient(180deg,#ffca7d,#ee9a2c);color:#231402;
+               box-shadow:0 5px 14px rgba(255,170,60,.4)}
+  .otacard .oi svg{width:23px;height:23px}
+  .otacard .ot{position:relative;flex:1;min-width:0}
+  .otacard .ot b{display:block;font-size:15.5px;font-weight:750;color:#ffd79a;letter-spacing:.3px}
+  .otacard .ot em{display:block;font-style:normal;font-size:11.5px;line-height:1.55;
+                  color:#a98a58;margin-top:3px}
+  .otacard .ot em i{font-style:normal;color:#d9a964;font-variant-numeric:tabular-nums}
+  .otacard .oa{position:relative;flex:0 0 auto;display:flex;align-items:center;color:#8d6d3a;
+               transition:transform .18s}
+  .otacard .oa svg{width:18px;height:18px}
+  .otacard.on{border-color:#ffc06a;
+              box-shadow:0 8px 26px rgba(255,180,80,.32),inset 0 1px 0 rgba(255,220,160,.2)}
+  .otacard.on .oa{transform:rotate(90deg);color:#ffc06a}
+
   /* ===== 固件升级面板（设备页内展开） ===== */
   .otabox{display:none;margin-top:10px}
   .otabox.show{display:block;animation:fade .18s ease-out}
@@ -271,7 +300,18 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
          color:var(--dim2);font-variant-numeric:tabular-nums;min-height:14px}
   .pmeta b{color:var(--amber);font-weight:600}
   .pbtn.amber{background:linear-gradient(180deg,#ffc06a,#f0a03c);border-color:#ffcf8a;color:#241503;
-              box-shadow:0 6px 18px rgba(255,180,84,.26)}
+              box-shadow:0 6px 18px rgba(255,180,84,.26);min-height:54px;font-size:15.5px;
+              font-weight:750;letter-spacing:.4px}
+  /* 选好文件、可以点了 → 呼吸光，提醒你按这里 */
+  .pbtn.amber:not([disabled]){animation:otaPulse 1.8s ease-in-out infinite}
+  @keyframes otaPulse{
+    0%,100%{box-shadow:0 6px 18px rgba(255,180,84,.26)}
+    50%    {box-shadow:0 10px 30px rgba(255,198,112,.55)}
+  }
+  .otabox h2{font-size:15px}
+  .otabox h2::before{content:"";display:inline-block;width:4px;height:14px;border-radius:2px;
+                     background:linear-gradient(180deg,#ffc06a,#ef9c33);margin-right:8px;
+                     vertical-align:-2px}
   .pbtn[disabled]{opacity:.45;pointer-events:none}
   .otaerr{font-size:11.5px;color:var(--red);margin-top:7px;line-height:1.6;display:none}
   .otaerr.show{display:block}
@@ -492,13 +532,24 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     <div class="kv"><span class="k">运行时长</span><span class="v mono" id="uptime">—</span></div>
   </div>
 
-  <div class="stack">
-    <a class="pbtn" href="#" id="otaOpen">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M4 20h16"/>
+  <button type="button" class="otacard" id="otaOpen">
+    <span class="oi">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 16.5V4.2"/><path d="M7 8.6l5-4.4 5 4.4"/><path d="M4.5 19.6h15"/>
       </svg>
-      固件升级（WiFi OTA）
-    </a>
+    </span>
+    <span class="ot">
+      <b>固件升级</b>
+      <em>WiFi OTA · 不用插线 · 当前 <i id="otaCur">—</i></em>
+    </span>
+    <span class="oa">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 5.5l6.5 6.5L9 18.5"/>
+      </svg>
+    </span>
+  </button>
+
+  <div class="stack">
     <button class="pbtn" id="helpOpen2">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="9"/><path d="M9.2 9.3a2.9 2.9 0 1 1 4 2.7c-.8.4-1.2 1-1.2 1.8v.3"/><path d="M12 17.2v.01"/>
@@ -1183,6 +1234,7 @@ function renderDev(j){
   $("dName").textContent = j.ssid || "—";
   $("dVer").textContent  = j.v || "—";
   $("dBld").textContent  = j.bld || "—";
+  if($("otaCur")) $("otaCur").textContent = j.v || "—";
   $("dRst").textContent  = RST[j.rs] || ("代码 " + j.rs);
 
   /* 调试日志 */
@@ -1195,8 +1247,9 @@ function renderDev(j){
             "[MSP ] " + (j.msp||"?") + "\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
                      " · 末帧 " + (j.lend|0) + " 颗\n" +
-            "[RX  ] 坏帧丢弃 " + (j.bad|0) + " · 高位 " + (j.hmin|0) + "~" + (j.hmax|0) +
-                     "ns · 阈值 " + (j.thr|0) + "ns · 最长低位 " + (j.lomax|0) + "ns\n" +
+            "[RX  ] 坏帧 " + (j.bad|0) + " · 残片 " + (j.frag|0) + " · 修正位 " + (j.clamp|0) +
+                     " · 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
+                     "ns · 最长低位 " + (j.lomax|0) + "ns\n" +
             "[BOOT] " + (j.boot||"?");
   if(dbgOn) $("logbox").textContent = logText;
 }
@@ -1402,6 +1455,7 @@ $("otaOpen").addEventListener("click", function(e){
   var box = $("otabox");
   var on = !box.classList.contains("show");
   box.classList.toggle("show", on);
+  $("otaOpen").classList.toggle("on", on);
   if(on) setTimeout(function(){ box.scrollIntoView({ block:"center", behavior:"smooth" }); }, 60);
 });
 

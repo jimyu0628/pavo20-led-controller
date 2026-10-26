@@ -25,15 +25,18 @@
 //   一帧在一次中断里连续收完，不需要续接。
 //   帧尾 = 低电平持续 > 20µs（比特间隔最长 850ns，帧间 reset ≥ 50µs）。
 //
-// v32.24 三条抗错码措施（原先只做「测宽 + 固定 600ns 阈值」，导致：
-//   全亮时几秒闪一次乱色、扫描灯效时不该亮的灯发暗光）：
-//   1) 位周期一致性检查：一次打断会把某个 bit 的高/低电平拉长，
-//      而位周期恒 1250ns —— (高+低) 超过标称 1.6 倍即判「被打断」
-//   2) 整帧校验：bit 数必须是 24 的整数倍（丢/多一个 bit 立刻暴露），
-//      且至少有 1 颗灯；不通过就【整帧丢弃】，屏幕上继续显示上一帧好画面
-//      —— 这样「闪一下别的颜色」变成「这一帧不动」，肉眼几乎看不出来
-//   3) 自适应阈值：用上一帧实测的「最短高位/最长高位」取中点当判别阈值，
-//      不写死 600ns，换飞控、换 LED 批次都不用重刷
+// v32.24 入门槛：位周期校验 + 整帧校验 + 自适应阈值
+// v32.25 重要修正（实测 bad:fps = 10230:5，几乎全是误判）
+//   原因：「(高+低) 超周期就整帧作废」把【中断延迟】当成【数据损坏】了。
+//   低电平段被 WiFi/BLE 中断插进来时，低循环退出得晚 → lo 变长，
+//   但 hi 的测量起点在低循环之后，值判定仍然准确。
+//   于是合法的好帧被成批判死，安全阀又反复重置参数 → 阈值永远停在 600ns。
+//   改为：
+//   a) 帧尾超时 20µs → 100µs（WiFi/BLE 中断延迟常达数十 µs，20µs 会把一帧切碎）
+//   b) 只有「高电平短到物理上不可能（<125ns）」才判真丢位 → 整帧作废
+//   c) 高电平被拉长（> 阈值 2.2 倍，说明测量期间被中断占住）→ 该 bit 保守判 0，
+//      只错 1 个 LSB，不整帧丢弃
+//   d) 残片（总 bit < 72）静默丢弃，不计入坏帧、不触发安全阀
 // ============================================================
 
 #define FC_GPIO_BIT    (1u << 4)      // GPIO4
@@ -41,14 +44,21 @@
 // 160MHz 主频：1 cycle = 6.25ns
 #define CYC_TO_NS(c)   ((uint32_t)(c) * 25u / 4u)
 
-// 帧尾判定超时 20µs（3200 cycle @160MHz）：bit 间低电平最长 850ns，
-// 帧间 reset ≥ 50µs，20µs 可明确区分（56µs 会漏判导致帧永不结束）。
-#define FC_RESET_TIMEOUT_CYC 3200
+// 帧尾判定超时 100µs（16000 cycle @160MHz）：
+//   WS2812 位间低电平最长 850ns，帧间 reset ≥ 50µs（Betaflight 实际 10ms 级），
+//   100µs 既能区分帧尾，又能容忍 WiFi/BLE 中断造成的数十 µs 延迟。
+//   v32.24 用的 20µs 太短：中断一插就把一帧切成几段，每段 bit 数都不是 24 倍数
+#define FC_RESET_TIMEOUT_CYC 16000
 // 单个 bit 的高电平下限（20 cycle ≈ 125ns）：低于此说明把一段低电平当成了
-// 「上升沿→下降沿」，即漏检了上升沿（被中断打断后重新对齐失败）
+// 「上升沿→下降沿」，即漏检了上升沿（真丢位）—— 这是唯一会让 24bit 分组错位、
+// 必须整帧作废的情况
 #define FC_HI_MIN_CYC   20
-// 位周期容差：实测 (高+低) 超过标称周期 1.6 倍 → 该 bit 被打断，整帧不可信
-#define FC_PERIOD_TOL_X10  16u
+// 高电平上限 = 阈值的 2.2 倍。超过说明这个 bit 的高电平段被中断拉长了，
+// 测出来的「宽」不代表真实值（0 码可能被读成 1，就是老的「暗光」根因），
+// 所以该 bit 按 0 处理（保守：宁可暗一个 LSB，也不要亮点/整帧丢）
+#define FC_HI_MAX_X10   22u
+// 残片阈值：总 bit 少于 3 颗灯就当作被打断的碎片，静默丢弃
+#define FC_FRAG_BITS    72u
 
 // ---------- ISR 与主循环共享 ----------
 static volatile uint8_t s_bad = 0;         // 本帧是否出现异常
@@ -106,6 +116,8 @@ volatile uint32_t g_rxLedAtEnd = 0;  // 最近一帧解出的灯数
 volatile uint32_t g_rxBad = 0;       // v32.24：数据异常被整帧丢弃的次数
 volatile uint32_t g_rxSeen = 0;      // v32.24：ISR 判定「一帧结束」的总次数（含坏帧）
 volatile uint32_t g_rxSkip = 0;      // v32.24：空触发（进中断时已是低电平）
+volatile uint32_t g_rxClamp = 0;     // v32.25：高电平被中断拉长、该 bit 被强制判 0 的次数
+volatile uint32_t g_rxFrag = 0;      // v32.25：被打断的残片（<3 颗灯）静默丢弃次数
 volatile uint16_t g_rxHiMinNs = 0;   // v32.24：最近一帧最短高位（ns）
 volatile uint16_t g_rxHiMaxNs = 0;   // v32.24：最近一帧最长高位（ns）
 volatile uint16_t g_rxLoMaxNs = 0;   // v32.24：最近一帧最长低位（ns）
@@ -149,11 +161,19 @@ static void IRAM_ATTR swEndFrame(void) {
 
     // 校验：出现异常 / bit 数不是 24 的整数倍（丢位或多位）/ 没有灯
     if (s_bad || s_swBitCnt != 0 || n == 0) {
+        // v32.25：帧被打断成小段（比如中断延迟把一帧切成两截）
+        // 只是一块残片，静默丢掉：不计坏帧、也不喂安全阀，
+        // 否则碎片会堆积成「连续坏 30 帧」把好不容易学到的参数重置掉
+        if ((uint32_t)n * 24u + s_swBitCnt < FC_FRAG_BITS) {
+            g_rxFrag = (uint32_t)(g_rxFrag + 1);
+            return;
+        }
         g_rxBad = (uint32_t)(g_rxBad + 1);
-        // 安全阀：连续坏 30 帧（约 1 秒）说明学到的阈值/周期本身不对，
-        // 回退到出厂值重新学，避免「一直判坏 → 画面永远定格」
+        // 安全阀：连续坏 200 帧（10 秒级）说明学到的阈值本身不对，
+        // 回退到出厂值重新学，避免「一直判坏 → 画面永远定格」。
+        // v32.25：30 → 200，原来太敏感，正常的偶发打断就会把参数打回出厂
         s_badRun++;
-        if (s_badRun >= 30) {
+        if (s_badRun >= 200) {
             s_badRun = 0;
             s_calibrated = 0;
             s_thrCyc = 96;
@@ -167,12 +187,19 @@ static void IRAM_ATTR swEndFrame(void) {
     // 学到参数：最短/最长高位取中点当阈值（要求两者分得开，即本帧 0/1 都有）
     // 第一次直接采用，之后按 1/8 平滑跟随 —— 刷机后第二帧就能用上正确阈值
     uint32_t hmin = s_fHiMin, hmax = s_fHiMax;
-    if (hmin != 0xFFFFFFFFu && hmax > hmin + hmin / 2) {
-        uint32_t t = (hmin + hmax) / 2;
-        if (t < 24) t = 24;
-        if (t > 300) t = 300;
-        s_thrCyc = s_calibrated ? ((s_thrCyc * 7 + t) / 8) : t;
+    if (hmin != 0xFFFFFFFFu && hmax > 0) {
+        // v32.25：hmin 可能是被中断截短的假值（实测见过 212ns，而真实 0 码 400ns）。
+        // 拿它算中点会把阈值拉低，导致 1 码被误判成 0（整条灯偏暗），
+        // 所以限制 hmin 不低于 hmax 的 2/5（0 码/1 码比值理论是 0.5）
+        if (hmin < hmax * 2u / 5u) hmin = hmax * 2u / 5u;
+        if (hmax > hmin + hmin / 2u) {
+            uint32_t t = (hmin + hmax) / 2u;
+            if (t < 24) t = 24;
+            if (t > 300) t = 300;
+            s_thrCyc = s_calibrated ? ((s_thrCyc * 7 + t) / 8) : t;
+        }
     }
+    // 周期只作诊断参考（v32.25 起不再拿它判坏帧，理由见文件头）
     if (s_nPeriod > 8) {
         uint32_t p = s_sumPeriod / s_nPeriod;
         if (p > 40 && p < 800) {
@@ -248,18 +275,23 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
         }
         hi = esp_cpu_get_cycle_count() - h0;
 
-        // 异常判定
-        if (hi < FC_HI_MIN_CYC) s_bad = 1;                       // 漏检上升沿
-        if (s_calibrated &&
-            (hi + lo) * 10u > s_periodCyc * FC_PERIOD_TOL_X10) {
-            s_bad = 1;                                           // 被打断，位周期被拉长
-        }
+        // 真丢位判定：高电平短到物理上不可能（<125ns）才算。
+        // 这是唯一会让 24bit 分组整体错位、必须整帧作废的情况
+        if (hi < FC_HI_MIN_CYC) s_bad = 1;
         if (hi > s_fHiMax) s_fHiMax = hi;
         if (hi < s_fHiMin) s_fHiMin = hi;
         if (lo > s_fLoMax) s_fLoMax = lo;
         s_sumPeriod += hi + lo;
         s_nPeriod++;
-        swPushBit(hi > s_thrCyc);
+        // 值判定：高电平被中断拉长时（> 阈值 2.2 倍，正常 1 码上限约 1.2µs），
+        // 测到的宽度不代表真实电平宽度，0 码可能被读成 1（老的「暗光」根因），
+        // 所以这一 bit 保守判 0：只错 1 个 LSB，不整帧丢弃、不闪整条灯带
+        if (hi * 10u > s_thrCyc * FC_HI_MAX_X10) {
+            g_rxClamp = (uint32_t)(g_rxClamp + 1);
+            swPushBit(false);
+        } else {
+            swPushBit(hi > s_thrCyc);
+        }
     }
 }
 
