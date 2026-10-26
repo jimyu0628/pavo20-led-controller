@@ -173,11 +173,22 @@ static int currentRatio() {
 // 所以单帧解出的灯数偶尔会比真实值少 1~2 颗；用峰值当基准，缺的尾部沿用
 // 最后一颗的颜色，避免灯带末端出现一小段黑。
 static int s_fcPeak = 0;
+static uint8_t s_peakLowRun = 0;   // v32.30：连续「本帧比峰值少」的帧数
 static void mapFcToStrip(const FcFrame& frame) {
     int ratio = currentRatio();
     int have = frame.count;
     if (have <= 0) return;
-    if (have > s_fcPeak) s_fcPeak = have;
+    // v32.30：峰值只用来补「偶尔少 1~2 颗」（中断延迟导致帧头丢位），不能只增不减。
+    // 否则一次解码错乱（解出 42 颗）就把基准永久抬高，飞控侧把灯数改小之后
+    // 本板永远跟不上 —— 末端该灭的灯会一直亮着。连续 20 帧（≈1 秒）都少就跟下来。
+    if (have > s_fcPeak) {
+        s_fcPeak = have;
+        s_peakLowRun = 0;
+    } else if (have < s_fcPeak) {
+        if (++s_peakLowRun >= 20) { s_fcPeak = have; s_peakLowRun = 0; }
+    } else {
+        s_peakLowRun = 0;
+    }
     int fc = s_fcPeak;
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
@@ -271,6 +282,11 @@ int webGetColor()  { return s_colorIdx; }
 int webGetSpeed()  { return s_speedPct; }   // v32.21：1~100（原来是 0/1/2 档位）
 int webGetBright() { return s_brightPct; }  // v32.21：0~100（原来是 0~3 档位）
 int webGetCalib()  { return s_calibCount; }
+// v32.30：飞控侧「应该发多少颗」。网页日志里跟「末帧 N 颗」并排显示，
+// 一眼就能看出飞控配置和本板是否对得上 —— 用户长期被「末帧 42 颗」误导，
+// 以为本板读到了飞控设置，其实它只是「本帧解出多少位 ÷ 24」。
+int webGetRatio()  { return currentRatio(); }
+int webGetFcNeed() { int r = currentRatio(); return (s_calibCount + r - 1) / r; }
 int webGetFcOrder(){ return s_fcOrder; }      // v32.23：飞控字节顺序索引 0~5
 bool webIsCalibrating() { return s_calibrating; }
 // ---------- v32.29：运行健康诊断（网页日志要看到，不然只能靠猜） ----------

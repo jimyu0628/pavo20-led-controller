@@ -41,6 +41,11 @@ int  webGetSpeed();   // v32.21：1~100（原来是 0/1/2 档位）
 int  webGetBright();  // v32.21：0~100（原来是 0~3 档位）
 int  webGetCalib();
 bool webIsCalibrating();
+// v32.30：飞控侧应该发多少颗（本板颗数 ÷ 比例，向上取整）。网页日志里与
+// 「末帧 N 颗」并排显示 —— 那个数字是**本板解出的位数 ÷ 24**，不是飞控配置，
+// 两者对不上就说明飞控侧灯数设错了，或者本帧有位被多算/少算。
+int  webGetRatio();
+int  webGetFcNeed();
 void webSetMode(int v);
 void webSetColor(int v);
 void webSetSpeed(int v);

@@ -137,7 +137,7 @@ static void sendState(httpd_req_t* req) {
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
              "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
              "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"ghost\":%u,\"mute\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
-             "\"dropb\":%u,\"cap\":%u,"
+             "\"dropb\":%u,\"cap\":%u,\"ratio\":%d,\"need\":%d,"
              // v32.29：健康诊断
              "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
              "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u}",
@@ -155,6 +155,7 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
              (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
              (unsigned)g_rxDropBits, (unsigned)g_rxCapUs,
+             webGetRatio(), webGetFcNeed(),
              webGetTxRate(), webGetTxFail(), webGetLoopGap(),
              webGetFcSilent(), webGetRxReset(),
              (unsigned)g_rxBits, (unsigned)g_rxMisalign,
