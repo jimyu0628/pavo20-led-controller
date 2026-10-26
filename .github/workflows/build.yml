@@ -24,6 +24,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # 临时：失败时把编译日志推到 ci-log 分支（排错完删掉）
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -58,6 +60,16 @@ jobs:
             sleep 8
           done
           pio run 2>&1 | tee build.log
+
+      - name: Push build log on failure
+        if: failure()
+        run: |
+          git config user.email "ci@local"
+          git config user.name "ci"
+          git checkout -B ci-log
+          git add -f build.log
+          git commit -m "ci build log" || true
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" ci-log
 
       - name: List build outputs
         run: ls -laR .pio/build/esp32-c3 | head -80
