@@ -167,8 +167,13 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
   /* 日志开关 + 日志框 */
   .toggle{display:flex;align-items:center;justify-content:space-between;font-size:13.5px;
           color:var(--dim);cursor:pointer;padding:6px 0 2px}
-  .switch{width:44px;height:26px;border-radius:20px;background:#2a2a33;position:relative;
-          transition:background .18s;flex:0 0 auto}
+  /* v32.34：必须显式 inline-block。span 默认是 inline，宽高会被忽略 ——
+     「调试信息」里的开关因为父级是 display:flex（flex 子项会被块化）才正常显示，
+     而「蓝牙广播」那一行的开关是套在 <span class="v"> 里面的，不是 flex 子项，
+     于是宽高失效、整个开关塌成 0 像素：页面上只看到「蓝牙广播」四个字，
+     右边空的。这就是「开关没显式显示在右侧」的真正原因。 */
+  .switch{display:inline-block;width:44px;height:26px;border-radius:20px;background:#2a2a33;position:relative;
+          vertical-align:middle;transition:background .18s;flex:0 0 auto}
   .switch::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;
                  border-radius:50%;background:#8a8a92;transition:left .18s,background .18s}
   .switch.on{background:#5a3f14}
@@ -504,7 +509,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     <div class="kv"><span class="k">在线设备</span><span class="v ok" id="cSta">—</span></div>
     <div class="kv"><span class="k">空闲自动关闭</span><span class="v amber" id="cIdle">—</span></div>
     <div class="prog"><i id="idlebar"></i></div>
-    <div class="note" id="cIdleNote">连续 60 秒没有设备连接、没有网页操作、没有蓝牙连接时，WiFi 与蓝牙会自动关闭，只保留灯带功能。重新开启需断电重启。</div>
+    <div class="note" id="cIdleNote">连续 15 分钟没有设备连接、没有网页操作、没有蓝牙连接时，WiFi 与蓝牙才会自动关闭，只保留灯带功能（重新开启需断电重启）。只要手机还连着热点，就永不自动关。</div>
   </div>
 
   <div class="card">
@@ -709,7 +714,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     <details class="sec">
       <summary><span class="sn">6</span>为什么热点会自己消失</summary>
       <div class="sc">
-        <p>为了省电、也为了飞行时不给飞控添干扰：连续 <b>60 秒</b>既没有设备连接、也没有网页操作、也没有蓝牙连接，WiFi 和蓝牙就会一起关掉，只留灯带继续工作。网页开着不动不算闲——页面每秒都在跟设备说话。</p>
+        <p>为了省电、也为了飞行时不给飞控添干扰：连续 <b>15 分钟</b>既没有设备连接、也没有网页操作、也没有蓝牙连接，WiFi 和蓝牙才会一起关掉，只留灯带继续工作。网页开着不动不算闲——页面每秒都在跟设备说话；手机连着热点也永不自动关。</p>
         <p>这是<em>一次性</em>的——关了之后不能再从网页打开，要断电重启才会恢复。所以调参时别让它闲着太久。</p>
       </div>
     </details>
@@ -717,7 +722,7 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     <details class="sec">
       <summary><span class="sn">7</span>遇到问题</summary>
       <div class="sc">
-        <p><b>网页打不开</b> —— 先确认手机还连着这个热点（状态栏没有 WiFi 图标就是切走了）；再确认没超过 60 秒闲置。</p>
+        <p><b>网页打不开</b> —— 先确认手机还连着这个热点（状态栏没有 WiFi 图标就是切走了）；再确认没超过 15 分钟闲置。</p>
         <p><b>灯带完全不亮</b> —— 亮度是不是拖到 0 了、颜色是不是选了「关」；再看飞控里有没有打开 <code>LED_STRIP</code> 功能。</p>
         <p><b>只有前几颗亮</b> —— 「灯带长度」设小了，调大。</p>
         <p><b>飞行器不动但灯带在跑</b> —— 正常，灯带逻辑独立于飞控状态。</p>
@@ -1324,11 +1329,16 @@ function renderDev(j){
   var lend = j.lend|0, need = j.need|0, board = j.count|0, ratio = j.ratio|0;
   var needTxt = "";
   if(need > 0){
-    needTxt = " · 飞控应发 " + need + " 颗（本板 " + board + " 颗 · 比例 1:" + ratio + "）";
-    if(Math.abs(lend - need) > 1){
-      needTxt += " · 对不上：差 " + Math.abs(lend - need) + " 颗" +
-                 (lend > need ? "，多出的被丢掉" : "，末端会缺色") +
-                 "（BF 里 LED 数量改成 " + need + "）";
+    // v32.34：这里原来写「飞控应发 N 颗」，可 N 是本板按比例算出来的**期望值**，
+    // 不是飞控真在发的数量 —— 现场看到「解出 42 · 飞控应发 23 · 差 19 颗」，
+    // 误以为是解码错了。现在分成两句：本板要用几颗、飞控实际在发几颗。
+    needTxt = " · 本板要用前 " + need + " 颗（" + board + " 颗 ÷ 1:" + ratio + "）";
+    if(lend > need + 1){
+      needTxt += " · 飞控实际在发 " + lend + " 颗，多出的用不上（想对齐就把 BF 的 LED 数量改成 "
+                 + need + "）";
+    }else if(lend < need - 1){
+      needTxt += " · 飞控只发了 " + lend + " 颗，比本板要的少 " + (need - lend)
+                 + " 颗（检查 BF 的 LED 数量和保存/重启）";
     }
   }
   var rsn = RST[j.rs] || ("代码 " + j.rs);

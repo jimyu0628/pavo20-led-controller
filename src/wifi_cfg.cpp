@@ -46,7 +46,13 @@ static volatile int s_dnsOk = 0;         // DNS 劫持是否绑定成功
 // v32.20：改成「一分钟不用就关」——用户要的是开机后没人来调参就彻底断电省电，
 // 不是挂在那儿等。判定口径见 wifiCfgPoll：没有手机连热点、没有 HTTP 请求、
 // 没有蓝牙连接，三者同时安静满 60 秒才动手。
-#define IDLE_OFF_MS     60000   // 无线闲置阈值：60 秒
+// v32.34：60 秒 → 15 分钟。现场反馈「WiFi 不稳定、会断开」，一大半原因就是这条：
+// 手机锁屏 / 浏览器切到后台，网页就不再每秒轮询 /api/state，于是「没有 HTTP、
+// 没有 STA」同时成立 60 秒 → 我们自己把热点关了，而「重新开启需断电重启」，
+// 用户看到的就是「无线突然没了、还得拔电」。调参场景本来就不该这么急。
+// 真在乎射频干扰的场合（长时间飞），手动点「关闭 WiFi」或者拔电就行。
+// 另外：只要热点上真有一台设备连着（staOnline>0），这条永远不触发。
+#define IDLE_OFF_MS     900000  // 无线闲置阈值：15 分钟
 #define OFF_NO_HTTP_MS 1800000 // 保留给「诊断串」显示剩余时间的老口径，逻辑上已不参与判定
 #define OFF_NO_STA_MS   1800000
 
@@ -565,7 +571,7 @@ void wifiCfgInit() {
         // 兜底：404/405 都交给 captive 处理器（POST/HEAD 探测也能被重定向）
         httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, handler_captive_err);
         httpd_register_err_handler(s_httpd, HTTPD_405_METHOD_NOT_ALLOWED, handler_captive_err);
-        printf("[WiFi] 热点 %s 已开启；无人使用满 60 秒会自动关 WiFi + 蓝牙\n", WIFI_SSID);
+        printf("[WiFi] 热点 %s 已开启；无人使用满 15 分钟才会自动关 WiFi + 蓝牙\n", WIFI_SSID);
         printf("[CP] 通配路由已启用（uri_match_fn=wildcard），探测请求一律 302 → http://192.168.4.1/\n");
     } else {
         printf("[WiFi] httpd FAILED\n");
@@ -638,7 +644,7 @@ void wifiCfgPoll(uint32_t nowMs) {
     // ②③ 都不成立，看距离上次「用过」多久了（touchHttp 已经算过 ②）
     uint64_t idleMs = (nowUs - s_lastActUs) / 1000;
     if (idleMs > IDLE_OFF_MS) {
-        shutdownRequest("无线闲置满 60 秒");
+        shutdownRequest("无线闲置满 15 分钟");
         return;
     }
     // 每跨过 10 秒报一次剩余，串口能看到它确实在往 0 走

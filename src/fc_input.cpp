@@ -236,8 +236,23 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
 
 static volatile uint16_t s_ghostRun = 0;
 static volatile uint32_t s_muteUntilCyc = 0;
+// v32.34【现场真凶 —— 必须用独立标志，不能用 0 当哨兵】
+//   旧写法：return (int32_t)(cycle - s_muteUntilCyc) < 0;
+//   而 s_muteUntilCyc 平时是 0（上电初值 / fcRxReset 里也清 0）。
+//   cycle 是 32 位、160MHz，2^31 拍 = **13.42 秒**：
+//     开机 0~13.4s   cycle-0 正数 → 不静默（正常收帧）
+//     13.4~26.8s     cycle-0 最高位为 1 → (int32_t) 变负数 → **一直静默**
+//     之后每次计数器越过 2^31 都静默 13.4 秒
+//   现场表现完全对上：跑十几秒灯全灭，过十几秒自己又亮；
+//   日志里「飞控静默 13s」「窗口超时 36」（13.4s ÷ 400ms 开窗周期 ≈ 33 次）、
+//   「自愈 5」（13s ÷ 2s ≈ 6 次）三个数全对得上。
+//   现在只在真的置了静默时才比对时间，且到点自动清零。
+static volatile bool s_muteOn = false;
 static inline bool IRAM_ATTR fcMuted(void) {
-    return (int32_t)(esp_cpu_get_cycle_count() - s_muteUntilCyc) < 0;
+    if (!s_muteOn) return false;
+    if ((int32_t)(esp_cpu_get_cycle_count() - s_muteUntilCyc) < 0) return true;
+    s_muteOn = false;          // 静默到期：清掉，别再算
+    return false;
 }
 
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
@@ -270,6 +285,7 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
                 s_ghostRun = 0;
                 g_rxMute = (uint32_t)(g_rxMute + 1);
                 s_muteUntilCyc = esp_cpu_get_cycle_count() + 320000000u; // 2s @160MHz
+                s_muteOn = true;   // v32.34：先定截止时间，再置标志
             }
             portEXIT_CRITICAL_ISR(&s_capMux);
             return;
@@ -467,6 +483,7 @@ void fcRxReset() {
     // 「边采边写」更乱（表现为偶发整条灯带颜色跳一下）。缓冲交给双缓冲自己
     // 翻转就行，这里只清「静默 / 校准」这类纯状态量。
     s_ghostRun = 0;
+    s_muteOn = false;            // v32.34：清静默要用标志，光清时间戳没用
     s_muteUntilCyc = 0;
     s_cal = 0;
     s_periodCyc = FC_PERIOD_NOM;
