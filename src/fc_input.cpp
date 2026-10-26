@@ -50,8 +50,20 @@
 // Betaflight 帧间 reset 远大于 50µs）。v32.25 的 100µs 会把下一帧的开头
 // 一起吞进来，50µs 足够区分又不会跨帧。
 #define FC_GAP_CYC        8000u
-// 进中断后等线变低的超时：200µs。超过说明线是常高（飞控没在发 / 掉线）
-#define FC_ENTRY_MAX_CYC  32000u
+// 进中断时线还是高（上升沿之后 1~2µs 内进来的）：等它变低的上限 25µs。
+// 超过说明线是常高（飞控没在发 / 掉线），立刻退出，别在临界区里干等
+#define FC_ENTRY_LOW_MAX_CYC  4000u
+// v32.28【关键】等「下一个上升沿」的上限：3µs。
+// 真数据位周期恒 1250ns，位间低最长 850ns —— 3µs 内一定会有下一个上升沿。
+// 等不到就说明这次中断根本不是一帧的起点（上一帧收完留下的幽灵边沿，或线上的噪声跳变）。
+// v32.27 在这种情况还要等满 50µs 才记一个残片，结果是：
+// 线上每秒几十~几千个噪声跳变 × 每次 50µs 全在「中断屏蔽」里 =
+// WiFi/BLE 和主循环一起被饿死 → 死机（现场：残片 306536）。
+#define FC_ENTRY_RISE_CYC     480u
+// v32.28：低电平短到物理上不可能（<250ns，真 1 码的低也有 450ns）→ 是毛刺把一位切开
+#define FC_MIN_LOW_CYC        40u
+// 连续多少次「幽灵边沿、且一个真帧都没收到」就静默 2 秒（防死机的最后一道闸）
+#define FC_GHOST_RUN_MAX      300u
 // 单帧捕获硬上限：5ms（45 颗约 1.35ms，留 3 倍余量）。防止线被拉成常低时
 // 在「无中断」状态下卡死，把 WiFi 一起拖垮
 #define FC_CAP_MAX_CYC    800000u
@@ -144,6 +156,8 @@ volatile uint32_t g_rxBad = 0;       // 出现过「高电平短到不可能」�
 volatile uint32_t g_rxClamp = 0;     // 高电平被拉长、该 bit 强制判 0 的次数
 volatile uint32_t g_rxFrag = 0;      // 不足 1 颗灯的残片，丢弃次数
 volatile uint32_t g_rxDropBits = 0;  // 最近一帧帧头丢掉的 bit 数（= cnt%24）
+volatile uint32_t g_rxGhost = 0;     // 「不是帧起点」的中断次数（幽灵边沿 / 线上噪声跳变）
+volatile uint32_t g_rxMute = 0;      // 因幽灵边沿太多而静默采集的次数（>0 说明线被干扰得很厉害）
 volatile uint16_t g_rxHiMinNs = 0;   // 最近一帧最短高位（ns）
 volatile uint16_t g_rxHiMaxNs = 0;   // 最近一帧最长高位（ns）
 volatile uint16_t g_rxLoMaxNs = 0;   // 最近一帧最长低位（ns）
@@ -217,35 +231,70 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0) {
 }
 
 // ---------- GPIO 上升沿中断：一次中断收完整帧 ----------
-// 退出临界区前必须清掉 GPIO 中断状态锁存。整帧的 1080 个上升沿都会把这个锁存位
-// 重新置起来（它只看 GPIO_PINn_INT_ENA，不受 CPU 全局中断使能影响），所以
-// portEXIT_CRITICAL_ISR 一开中断，CPU 立刻又进一次本 ISR —— 那时线已经是低的，
-// 只会在里面空等 50µs 然后记一个「残片」再退出。
-// v32.26 现场日志 残片 5358 ≈ LED 帧 5356（每帧正好多一次）就是这次幽灵中断，
-// 它白烧 50µs CPU，还把网页日志的「本帧诊断」全刷成 0。
+// 进/出中断都必须清 GPIO 中断状态锁存：整帧的 1080 个上升沿都会把锁存位重新置起来
+// （它只看 GPIO_PINn_INT_ENA，不受 CPU 全局中断使能影响）。进中断就先清一次，
+// 保证任何一条返回路径都不会留下「已锁存未清除」的状态 —— 那条线一直悬着的话，
+// CPU 会反复重入本 ISR，主循环和 WiFi 全部拿不到时间片，表现就是死机。
 #define FC_IRQ_CLEAR()   REG_WRITE(GPIO_STATUS_W1TC_REG, FC_GPIO_BIT)
 
+// 连续幽灵边沿计数；收到一个真帧就清零
+static volatile uint16_t s_ghostRun = 0;
+// 静默截止时刻（CPU 周期）。幽灵边沿刷屏时宁可暂时不跟灯，也不能把 CPU 卡死
+static volatile uint32_t s_muteUntilCyc = 0;
+static inline bool IRAM_ATTR fcMuted(void) {
+    return (int32_t)(esp_cpu_get_cycle_count() - s_muteUntilCyc) < 0;
+}
+
+// v32.28 采集流程（每一条都是被现场日志逼出来的）：
+//   ① 进中断先清锁存 → 不会因为「悬着的中断」反复重入（死机的根）
+//   ② 等当前高电平结束 → 等下一个上升沿，上限 3µs。真数据位间低最多 850ns，
+//      3µs 还等不到上升沿 = 这次中断不是帧起点（上一帧留下的幽灵边沿 / 线上噪声），
+//      立刻退出。绝不能像 v32.27 那样在里面空等 50µs —— 现场 残片 306536
+//      就是几十~几千个噪声跳变 × 每次 50µs 全在「中断屏蔽」里，把系统饿死。
+//   ③ 从第一个上升沿开始逐位测高电平，不再丢掉帧头那一位（旧版每帧必丢 1 bit，
+//      靠帧尾 24 对齐补回来；丢掉的那颗灯只能用邻居顶替，颜色是错的）
+//   ④ 毛刺合并：低电平 <250ns（不物理）或高电平 <125ns（不物理）说明一位被切成了两段，
+//      把它累计到相邻位再判定。否则每出现一次毛刺就多 1 个 bit，
+//      后面所有灯的 24bit 分组整体错开（现场：帧头丢 14bit、异常帧 89%）
+//   ⑤ 幽灵边沿连续 300 次且期间一个真帧都没有 → 静默 2 秒（看门狗兜底）
 static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
+    FC_IRQ_CLEAR();             // ① 先清锁存
     if (!s_active) return;      // 不需要飞控灯的场合（本地灯效）直接走开
+    if (fcMuted()) return;      // 风暴静默期
 
     // 【核心】整个帧在临界区里采完：忙等期间哪怕只被打断一次，
     // 这个 bit 的宽度就是错的（WiFi/BLE 中断延迟可达数十 µs）
     portENTER_CRITICAL_ISR(&s_capMux);
     uint32_t t0 = esp_cpu_get_cycle_count();
 
-    // 1) 等当前这个高电平结束。我们是上升沿之后几百 ns~几 µs 才进来的，
-    //    位宽已经被截短，所以这个 bit 不要（丢几位由帧尾 24 对齐补回来）
+    // ②-a：进中断时线一般还是高的（上升沿之后 1~2µs），等它变低
+    uint32_t t = t0;
     while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
-        if ((esp_cpu_get_cycle_count() - t0) > FC_ENTRY_MAX_CYC) {
-            g_rxDrop = (uint32_t)(g_rxDrop + 1);   // 线常高：没在发数据
-            FC_IRQ_CLEAR();
+        if (esp_cpu_get_cycle_count() - t > FC_ENTRY_LOW_MAX_CYC) {
+            g_rxDrop = (uint32_t)(g_rxDrop + 1);   // 线常高：飞控没在发
             portEXIT_CRITICAL_ISR(&s_capMux);
             return;
         }
     }
+    // ②-b：等下一个上升沿 = 本帧第一个 bit 的起点
+    uint32_t tLowLast = esp_cpu_get_cycle_count();
+    while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
+        tLowLast = esp_cpu_get_cycle_count();
+        if (tLowLast - t > FC_ENTRY_RISE_CYC) {
+            g_rxGhost = (uint32_t)(g_rxGhost + 1);
+            if (++s_ghostRun >= FC_GHOST_RUN_MAX) {
+                s_ghostRun = 0;
+                g_rxMute = (uint32_t)(g_rxMute + 1);
+                s_muteUntilCyc = esp_cpu_get_cycle_count() + 320000000u; // 2s @160MHz
+            }
+            portEXIT_CRITICAL_ISR(&s_capMux);
+            return;
+        }
+    }
+    uint32_t tRise = (tLowLast + esp_cpu_get_cycle_count()) / 2u;
 
-    // 2) 复位本帧统计
+    // 复位本帧统计
     uint16_t cnt = 0;
     uint32_t acc = 0, accN = 0;
     uint8_t* wp = s_bits[s_wr];
@@ -256,75 +305,80 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     s_sumPeriod = 0;
     s_nPeriod = 0;
     s_h0Sum = 0; s_h0N = 0; s_h1Sum = 0; s_h1N = 0;
-    uint8_t shortHi = 0;
+    uint8_t glitch = 0;         // 本帧是否出现过毛刺（= 信号质量指标，见 fc_end 的 g_rxBad）
+    uint32_t carry = 0;         // 被毛刺切开、待合并到相邻位的高电平
+    uint32_t loPrev = 0;        // 上一段的低电平（判毛刺用）
     g_rxDone = (uint32_t)(g_rxDone + 1);
 
-    uint32_t w0 = 0, lo = 0, hi = 0;
-
     while (1) {
-        // ---- 低电平段（bit 之间的间隔）----
-        // v32.27：边沿时刻取「最后一次仍为低」与「第一次读到高」的中点，
-        // 把轮询粒度（一拍≈12 周期≈75ns）带来的误差从「单向少算」变成「对称 ±半拍」。
-        // 原来单向少算 100~150ns，0/1 两簇整体左移且不对齐，阈值中点跟着偏。
-        w0 = esp_cpu_get_cycle_count();
-        uint32_t tLowLast = w0;
-        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
-            tLowLast = esp_cpu_get_cycle_count();
-            if (tLowLast - w0 > FC_GAP_CYC) goto cap_done;   // 帧尾 reset（同时也是死循环保险）
-        }
-        uint32_t tRise = (tLowLast + esp_cpu_get_cycle_count()) / 2u;
-
-        // ---- 高电平段（决定这一 bit 是 0 还是 1）----
+        // ---- 高电平段（从 tRise 到下降沿）。边沿时刻取「最后一次仍为高」与
+        //      「第一次读到低」的中点，把轮询粒度（≈75ns）的误差从单向少算
+        //      变成对称 ±半拍（v32.27 修弱光时加的，保留）----
         uint32_t tHiLast = tRise;
         while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
             tHiLast = esp_cpu_get_cycle_count();
-            if (tHiLast - tRise > FC_GAP_CYC) goto cap_done; // 线被拉长 / 帧尾（同上是保险）
+            if (tHiLast - tRise > FC_GAP_CYC) goto cap_done;  // 线被拉长 / 保险
         }
         uint32_t tFall = (tHiLast + esp_cpu_get_cycle_count()) / 2u;
+        uint32_t hiRaw = tFall - tRise;
+        if (tFall - t0 > FC_CAP_MAX_CYC) goto cap_done;       // 整帧硬上限
 
-        hi = tFall - tRise;
-        lo = tRise - w0;
-        // 整帧硬上限（每 bit 判一次，不在内层轮询里加开销）：
-        // 线一直被拉成有跳变但不成帧时，别在「无中断」状态里卡死
-        if (tFall - t0 > FC_CAP_MAX_CYC) goto cap_done;
-
-        // ---- 统计（只做诊断，不再拿这些判据整帧作废）----
-        if (hi < FC_HI_MIN_CYC) shortHi = 1;
-        if (hi > s_fHiMax) s_fHiMax = hi;
-        if (hi < s_fHiMin) s_fHiMin = hi;
-        if (lo > s_fLoMax) s_fLoMax = lo;
-        s_sumPeriod += hi + lo;
-        s_nPeriod++;
-
-        // ---- 值判定 ----
-        bool one;
-        if (hi * 10u > s_thrCyc * FC_HI_MAX_X10) {
-            g_rxClamp = (uint32_t)(g_rxClamp + 1);   // 测宽被拉长，保守判 0
-            one = false;
+        // ---- ④ 毛刺判定：这一段的「高太短」或「前面那段低太短」→ 一位被切开了 ----
+        if (hiRaw < FC_HI_MIN_CYC || (loPrev != 0 && loPrev < FC_MIN_LOW_CYC)) {
+            glitch = 1;
+            carry += hiRaw;
+            if (carry > 400u) carry = 400u;                   // 病态信号兜底
         } else {
-            one = (hi > s_thrCyc);
-        }
-        // 按判定结果分簇累计（供帧尾算两簇均值中点当新阈值）
-        if (one) { s_h1Sum += hi; s_h1N++; }
-        else     { s_h0Sum += hi; s_h0N++; }
+            uint32_t hi = hiRaw + carry;
+            carry = 0;
 
-        // ---- 压入 bit（按字节攒，省得每个 bit 都读改写）----
-        if (cnt < FC_MAX_BITS) {
-            acc = (acc << 1) | (one ? 1u : 0u);
-            if (++accN == 8) {
-                *wp++ = (uint8_t)acc;
-                acc = 0;
-                accN = 0;
+            // 统计（只做诊断，不拿这些判据整帧作废）
+            if (hi > s_fHiMax) s_fHiMax = hi;
+            if (hi < s_fHiMin) s_fHiMin = hi;
+            s_sumPeriod += hi;
+            s_nPeriod++;
+
+            // 值判定
+            bool one;
+            if (hi * 10u > s_thrCyc * FC_HI_MAX_X10) {
+                g_rxClamp = (uint32_t)(g_rxClamp + 1);        // 测宽被拉长，保守判 0
+                one = false;
+            } else {
+                one = (hi > s_thrCyc);
             }
-            cnt++;
+            if (one) { s_h1Sum += hi; s_h1N++; }
+            else     { s_h0Sum += hi; s_h0N++; }
+
+            // 压入 bit（按字节攒）
+            if (cnt < FC_MAX_BITS) {
+                acc = (acc << 1) | (one ? 1u : 0u);
+                if (++accN == 8) {
+                    *wp++ = (uint8_t)acc;
+                    acc = 0;
+                    accN = 0;
+                }
+                cnt++;
+            }
         }
+
+        // ---- 低电平段：等到下一个上升沿；超 50µs 就是帧尾 ----
+        uint32_t tLowEnd = tFall;
+        while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) == 0) {
+            tLowEnd = esp_cpu_get_cycle_count();
+            if (tLowEnd - tFall > FC_GAP_CYC) goto cap_done;
+        }
+        tRise = (tLowEnd + esp_cpu_get_cycle_count()) / 2u;
+        loPrev = tRise - tFall;
+        if (loPrev > s_fLoMax) s_fLoMax = loPrev;
+        s_sumPeriod += loPrev;
     }
 
 cap_done:
     if (accN) *wp = (uint8_t)(acc << (8 - accN));   // 末尾不满一字节，低位补 0
-    if (shortHi) g_rxBad = (uint32_t)(g_rxBad + 1);
+    if (glitch) g_rxBad = (uint32_t)(g_rxBad + 1);   // 本帧掺了毛刺：信号质量在用这个看
     fcEndFrame(cnt, t0);
-    FC_IRQ_CLEAR();          // 清掉整帧积累的上升沿锁存，避免退出后再空转一次
+    if (cnt >= 24) s_ghostRun = 0;  // 收到真帧：幽灵计数清零
+    FC_IRQ_CLEAR();                 // 清掉整帧积累的上升沿锁存
     portEXIT_CRITICAL_ISR(&s_capMux);
 }
 

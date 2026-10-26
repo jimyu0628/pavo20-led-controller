@@ -397,11 +397,12 @@ extern "C" void app_main(void) {
                 lastRxLogMs = now;
                 char head[48];
                 fcRxHeadHex(head, sizeof(head));
-                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u frag=%u clamp=%u led=%u drop=%u | hi=%u..%u lo=%u thr=%u ns | cap=%uus ord=%s head=%s\n",
+                logMsg("[RX] ok=%d err=0x%x frames=%u bad=%u frag=%u clamp=%u ghost=%u mute=%u led=%u drop=%u | hi=%u..%u lo=%u thr=%u ns | cap=%uus ord=%s head=%s\n",
                        fcRxOk() ? 1 : 0, (unsigned)fcRxErr(),
                        (uint32_t)g_rxFrames, (uint32_t)g_rxBad, (uint32_t)g_rxFrag,
-                       (uint32_t)g_rxClamp, (uint32_t)g_rxLastLeds,
-                       (uint32_t)g_rxDropBits,
+                       (uint32_t)g_rxClamp,
+                       (uint32_t)g_rxGhost, (uint32_t)g_rxMute,
+                       (uint32_t)g_rxLastLeds, (uint32_t)g_rxDropBits,
                        (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
                        (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
                        (unsigned)g_rxCapUs,

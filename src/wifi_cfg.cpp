@@ -136,7 +136,7 @@ static void sendState(httpd_req_t* req) {
              "\"v\":\"%s\",\"bld\":\"%s %s\",\"up\":%lu,\"rs\":%d,"
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
              "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
-             "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
+             "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"ghost\":%u,\"mute\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
              "\"dropb\":%u,\"cap\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
@@ -148,6 +148,7 @@ static void sendState(httpd_req_t* req) {
              mspTcpDiag(), bleUartDiag(), wifiCfgBootInfo(),
              webGetFcOrder(), fcRxOrderName(), (unsigned)g_rxLedAtEnd, head,
              (unsigned)g_rxBad, (unsigned)g_rxFrag, (unsigned)g_rxClamp,
+             (unsigned)g_rxGhost, (unsigned)g_rxMute,
              (unsigned)g_rxHiMinNs, (unsigned)g_rxHiMaxNs,
              (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
              (unsigned)g_rxDropBits, (unsigned)g_rxCapUs);

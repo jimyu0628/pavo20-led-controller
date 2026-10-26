@@ -1249,6 +1249,8 @@ function renderDev(j){
                      " · 末帧 " + (j.lend|0) + " 颗\n" +
             "[RX  ] 异常帧 " + (j.bad|0) + " · 残片 " + (j.frag|0) + " · 强制位 " + (j.clamp|0) +
                      " · 帧头丢 " + (j.dropb|0) + "bit\n" +
+            "[RX  ] 幽灵边沿 " + (j.ghost|0) + " · 静默 " + (j.mute|0) + " 次" +
+                     ((j.mute|0) > 0 ? "（线被干扰，采集已自动让路）" : "") + "\n" +
             "[RX  ] 高位 " + (j.hmin|0) + "~" + (j.hmax|0) + "ns · 阈值 " + (j.thr|0) +
                      "ns · 最长低位 " + (j.lomax|0) + "ns · 捕获 " + (j.cap|0) + "µs\n" +
             "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
