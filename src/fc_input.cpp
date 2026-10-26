@@ -31,9 +31,9 @@
 //   ③整帧 bit 数不是 24 的倍数（v32.24/25 的校验把它全判坏 → 画面完全不动）。
 //
 //   本次三条改法：
-//   a) 【关键】进入 ISR 后立刻把 INTENABLE 清零，整个帧在「无中断」状态下采完
-//      （45 颗 ≈ 1.35ms）。这是唯一能让测量准确的办法；代价是 WiFi/BLE 中断
-//      被推迟 1.35ms，30Hz 下占空比 4%，实测无影响。
+//   a) 【关键】进入 ISR 后立刻进临界区（RISC-V 上等于关全局中断使能），
+//      整个帧在「无中断」状态下采完（45 颗 ≈ 1.35ms）。这是唯一能让测量
+//      准确的办法；代价是 WiFi/BLE 中断被推迟 1.35ms，30Hz 下占空比 4%。
 //   b) 位数据改成【原始 bit 数组】，帧尾再按 24 对齐分组：丢掉帧头 cnt%24 个 bit，
 //      使分组终点正好落在帧尾 —— 不管帧头丢了几位，后面的 LED 一定对齐，
 //      不会像原来那样「从帧头开始每 24 位切一刀」把颜色整体转位。
@@ -63,19 +63,12 @@
 #define FC_MAX_BITS       (FC_MAX_LEDS * 24)
 #define FC_BITS_BYTES     (FC_MAX_BITS / 8)
 
-// ---------- 中断全屏蔽 ----------
-// 直接读写 INTENABLE：比 portDISABLE_INTERRUPTS()（只压到 XCHAL_EXCM_LEVEL）
-// 更彻底，能把 WiFi/BLE 的 3~5 级中断一起挡在外面。ISR 退出汇编只恢复 PS，
-// 不碰 INTENABLE，所以这里改了不会被「还原」，必须自己恢复。
-static inline uint32_t IRAM_ATTR fcIntrOffAll(void) {
-    uint32_t old;
-    __asm__ __volatile__("rsr %0, INTENABLE" : "=a"(old));
-    __asm__ __volatile__("wsr %0, INTENABLE\n\trsync" :: "a"(0u));
-    return old;
-}
-static inline void IRAM_ATTR fcIntrRestore(uint32_t old) {
-    __asm__ __volatile__("wsr %0, INTENABLE\n\trsync" :: "a"(old));
-}
+// ---------- 采集期间的中断屏蔽 ----------
+// ESP32-C3 是 RISC-V 内核，所有外设中断共用 mstatus.MIE 一个总开关，
+// portENTER_CRITICAL_ISR 会把它清零 —— WiFi / BLE / 系统 tick 全部推迟到
+// 采完之后，测量不会再被打断。比 portDISABLE_INTERRUPTS() 语义更明确，
+// 也比手写 CSR 汇编可移植（那边 rsr/wsr 是 Xtensa 指令，C3 上编不过）。
+static portMUX_TYPE s_capMux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---------- ISR 与主循环共享 ----------
 // 采集开关：只有 Betaflight 模式或标定中才需要飞控帧。关掉时 ISR 立刻返回，
@@ -193,9 +186,9 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     (void)arg;
     if (!s_active) return;      // 不需要飞控灯的场合（本地灯效）直接走开
 
-    // 【核心】进入就关掉所有可屏蔽中断。忙等期间哪怕只被打断一次，
+    // 【核心】整个帧在临界区里采完：忙等期间哪怕只被打断一次，
     // 这个 bit 的宽度就是错的（WiFi/BLE 中断延迟可达数十 µs）
-    uint32_t intSaved = fcIntrOffAll();
+    portENTER_CRITICAL_ISR(&s_capMux);
     uint32_t t0 = esp_cpu_get_cycle_count();
 
     // 1) 等当前这个高电平结束。我们是上升沿之后几百 ns~几 µs 才进来的，
@@ -203,7 +196,7 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     while ((REG_READ(GPIO_IN_REG) & FC_GPIO_BIT) != 0) {
         if ((esp_cpu_get_cycle_count() - t0) > FC_ENTRY_MAX_CYC) {
             g_rxDrop = (uint32_t)(g_rxDrop + 1);   // 线常高：没在发数据
-            fcIntrRestore(intSaved);
+            portEXIT_CRITICAL_ISR(&s_capMux);
             return;
         }
     }
@@ -275,7 +268,7 @@ cap_done:
     if (accN) *wp = (uint8_t)(acc << (8 - accN));   // 末尾不满一字节，低位补 0
     if (shortHi) g_rxBad = (uint32_t)(g_rxBad + 1);
     fcEndFrame(cnt, t0);
-    fcIntrRestore(intSaved);
+    portEXIT_CRITICAL_ISR(&s_capMux);
 }
 
 // ---------- 从 bit 数组取第 i 颗灯 ----------
