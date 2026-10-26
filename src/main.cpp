@@ -194,7 +194,15 @@ static void mapFcToStrip(const FcFrame& frame) {
         int src = i / ratio;
         if (src >= fc) { s_strip[i] = RGB(); continue; }  // 超出飞控灯数：灭
         if (src >= have) src = have - 1;                  // 本帧偏短：尾部沿用最后一颗
-        s_strip[i] = frame.leds[src];
+        RGB c = frame.leds[src];
+        // v32.31 暗切：飞控在「不亮」的区域并不是给 0，而是给一个极小的值 ——
+        // 现场实测 BF 亮度 100 时暗区就是 0x08（8/255 = 3%），亮度 11 时是 0x01。
+        // 本板再乘 42% 亮度后落在 1/255 附近，暗环境里就是那层「弱光」。
+        // 解码再准也消不掉它，只能在这里切掉：≤ FC_DARK_CUT 的分量一律归零。
+        if ((uint8_t)c.r <= FC_DARK_CUT) c.r = 0;
+        if ((uint8_t)c.g <= FC_DARK_CUT) c.g = 0;
+        if ((uint8_t)c.b <= FC_DARK_CUT) c.b = 0;
+        s_strip[i] = c;
     }
     refreshStrip();
 }

@@ -6,6 +6,7 @@
 #include "esp_timer.h"
 #include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"   // v32.31：pollFcInput 里用 portENTER_CRITICAL（任务上下文）
 #include "driver/gpio.h"
 #include "soc/gpio_reg.h"
 
@@ -406,11 +407,17 @@ void fcInputInit() {
 }
 
 // ---------- 自愈：把采集状态清干净（收到帧卡死时调用） ----------
+// v32.31【重要】这里原来是 gpio_isr_handler_remove() + gpio_isr_handler_add()，
+// 而 gpio_isr_handler_add 在 handler 已存在时返回 ESP_ERR_INVALID_STATE ——
+// 返回值根本没检查。一旦 remove 成功、add 失败，GPIO 中断就彻底没了，
+// **只有重启 ESP32 才能恢复**，而且飞控那边重启完全没用 —— 现场
+// 「灯全灭、BF 重启无效、ESP32 重启就好、有时几分钟自己又活」就是它。
+// 另一个问题：remove/add 每次都要重新分配中断，ISR 延迟抖动 → 采到错帧。
+//
+// 现在不碰中断了：采集开关 s_active 只是一个标志，ISR 每进来先看它，
+// GPIO 中断从头到尾一直是开着的，所以「重挂中断」这件事根本不需要做。
 void fcRxReset() {
-    // 重挂中断：万一 GPIO 的中断使能被谁关掉了/被异常状态卡住，只有摘了重挂
-    // 才能保证下一次上升沿一定进得来（现场「重启才恢复」就是这一步缺失）
-    gpio_isr_handler_remove(GPIO_NUM_4);
-    FC_IRQ_CLEAR();
+    FC_IRQ_CLEAR();              // 清掉可能悬着的锁存，保证下次上升沿能进来
     s_frameReady = false;
     s_wr = 0;
     s_pub = 0;
@@ -420,7 +427,6 @@ void fcRxReset() {
     s_muteUntilCyc = 0;
     s_cal = 0;
     s_periodCyc = FC_PERIOD_NOM;
-    gpio_isr_handler_add(GPIO_NUM_4, fcRiseIsr, NULL);
 }
 
 // ---------- 轮询：取完整帧 ----------
@@ -442,6 +448,11 @@ bool pollFcInput(FcFrame* out) {
     int n = (int)((cnt - start) / 24);
     if (n > FC_MAX_LEDS) n = FC_MAX_LEDS;
 
+    // v32.31【竞态】双缓冲只有 2 块：发布后 s_wr 会翻到我们正在读的这一块，
+    // 下一次采集（1.3ms 内）就会边采边写，我们读到的就是半新半旧的乱码 ——
+    // 表现为「颜色乱跳 / 偶尔全黑」。取帧期间短关中断（约 5~10µs，
+    // 远小于 RMT 80µs 的续填周期），读完再放开。
+    portENTER_CRITICAL(&s_capMux);
     for (int i = 0; i < n; i++) {
         uint8_t raw[3];
         fcGetLed(base, start, i, raw);
@@ -449,6 +460,7 @@ bool pollFcInput(FcFrame* out) {
         out->leds[i].g = raw[m[1]];
         out->leds[i].b = raw[m[2]];
     }
+    portEXIT_CRITICAL(&s_capMux);
 
     // 帧头那一位必然采不到（中断进不来那么快），对齐后正好少一颗灯。
     // 把它补回来：向前复制一颗，这样灯带末端不会缺一段，飞控灯数也和实际一致。
