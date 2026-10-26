@@ -418,6 +418,10 @@ void fcInputInit() {
 // GPIO 中断从头到尾一直是开着的，所以「重挂中断」这件事根本不需要做。
 void fcRxReset() {
     FC_IRQ_CLEAR();              // 清掉可能悬着的锁存，保证下次上升沿能进来
+    // v32.32：幂等补挂 —— handler 已经在时 gpio_isr_handler_add 返回
+    // ESP_ERR_INVALID_STATE（无害，不破坏任何东西）；只有真的丢了才会装上。
+    // v32.31 的问题是先 remove 再 add，add 失败就永久没中断；这里不 remove。
+    gpio_isr_handler_add(GPIO_NUM_4, fcRiseIsr, NULL);
     s_frameReady = false;
     s_wr = 0;
     s_pub = 0;

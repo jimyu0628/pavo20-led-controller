@@ -489,9 +489,14 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
 
   <div class="card">
     <h2>蓝牙调参<span>与热点同名</span></h2>
+    <div class="kv" id="bleRow" style="cursor:pointer">
+      <span class="k">蓝牙广播 <em style="color:var(--dim2);font-style:normal">（点此行开关）</em></span>
+      <span class="v"><span class="switch" id="bleSw"></span></span>
+    </div>
     <div class="kv"><span class="k">广播名称</span><span class="v mono" id="bSsid">—</span></div>
     <div class="kv"><span class="k">状态</span><span class="v" id="bState">—</span></div>
     <div class="kv"><span class="k">透传通道</span><span class="v" id="bDiag">—</span></div>
+    <div class="note" id="bNote">广播已关（默认）：手机搜不到本机，WiFi / USB 调参照常。</div>
     <div class="note">手机系统蓝牙里连这台设备，再在 Betaflight App 的端口列表里选它即可，不需要配对码。</div>
   </div>
 
@@ -1147,6 +1152,44 @@ function renderFcOrder(){
   b.textContent = (st.fordn || ORDER_NAMES[st.ford|0] || "—") + " ⇄";
 }
 
+/* ================= BLE 广播开关（v32.32） ================= */
+/* 默认关。C3 是单射频，BLE 广播和 WiFi 分时抢同一个射频，广播事件会打断灯带
+   数据流（灯带偶发频闪）。只有要用手机 App 蓝牙调参时才打开，调完关掉。
+   开关即时生效、断电记忆，不需要重启（协议栈一直在，只是不发广播包）。 */
+function renderBleSw(){
+  var sw = $("bleSw");
+  if(sw) sw.classList.toggle("on", (st.bleen|0) === 1);
+  var n = $("bNote");
+  if(n) n.textContent = (st.bleen|0) === 1
+    ? "广播中：手机蓝牙里能搜到本机。调完参数建议关掉，飞行时能少一层干扰。"
+    : "广播已关（默认）：手机搜不到本机，WiFi 调参（tcp://192.168.4.1:5761）与 USB 调参照常。";
+}
+function toggleBle(){
+  var on = ((st.bleen|0) === 1) ? 0 : 1;
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 8000;
+  req.onload = function(){
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.bleen === "number"){
+      st.bleen = j.bleen;
+      renderBleSw();
+      toast(j.bleen ? "蓝牙广播已打开，手机可以搜到本机了"
+                    : "蓝牙广播已关闭，灯带干扰最小");
+    }else{
+      renderBleSw();
+      toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    renderBleSw();
+    toast("上传失败：确认手机还连着本热点");
+  };
+  req.send("bleen=" + on);
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1175,6 +1218,9 @@ function absorb(j){
     st.ford  = j.ford;
     st.fordn = j.fordn || "";
   }
+  /* v32.32：BLE 广播开关（同样不属于「待应用」的 5 项，直接跟设备同步） */
+  if(typeof j.bleen === "number") st.bleen = j.bleen;
+  renderBleSw();
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
 }
@@ -1187,6 +1233,7 @@ function hhmmss(s){
 function bleText(s){
   if(!s) return "—";
   if(s.indexOf("off") >= 0)  return {t:"已关闭", c:""};
+  if(s.indexOf("idle") >= 0) return {t:"未广播（已关）", c:""};
   if(s.indexOf("err") >= 0 || s.indexOf("fail") >= 0) return {t:"异常", c:"amber"};
   if(s.indexOf("conn") >= 0) return {t:s.indexOf("no sub") >= 0 ? "已连接（未订阅）" : "已连接", c:"ok"};
   return {t:"广播中", c:"ok"};
@@ -1419,6 +1466,10 @@ function toast(t){
   clearTimeout(tt);
   tt = setTimeout(function(){ d.classList.remove("show"); }, 1600);
 }
+
+/* ================= 连接页：BLE 广播开关 ================= */
+var bleRow = $("bleRow");
+if(bleRow) bleRow.addEventListener("click", toggleBle);
 
 /* ================= 设备页：日志开关 ================= */
 $("dbgRow").addEventListener("click", function(){

@@ -35,3 +35,9 @@ int bleUartActive(void);
 // 只是省电，不影响灯带：飞控 LED 数据走 GPIO4 中断解码，跟 UART1/BLE 无关。
 // 关掉后要 esp_restart() 才能恢复。
 void bleUartStop(void);
+
+// v32.32：广播开关（网页「连接」页）。默认关 —— 只有要用手机蓝牙调参时才开。
+// C3 是单射频，WiFi 与 BLE 分时用；BLE 广播事件会打断灯带数据流 → 频闪。
+// 只切广播，协议栈与 UART1 透传仍在，随时可再打开（不像 bleUartStop 要重启）。
+void bleUartSetAdv(bool on);
+bool bleUartAdvAllowed(void);

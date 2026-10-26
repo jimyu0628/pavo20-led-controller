@@ -53,6 +53,9 @@ void webSetBright(int v);
 void webSetCount(int v); // 设置 LED 数量（1~128，断电记忆，等价按键标定）
 int  webGetFcOrder();    // v32.23：飞控 LED 字节顺序索引 0~5（0=GRB…5=BGR）
 void webSetFcOrder(int v); // v32.23：改飞控字节顺序（颜色不对时逐个试），断电记忆
+int  webGetBleAdv();     // v32.32：BLE 广播开关 0/1（默认 0=关，减少对灯带的干扰）
+void webSetBleAdv(int v); // v32.32：开关手机蓝牙调参广播，即时生效，断电记忆
+int  webGetCapDrop();    // v32.32：采集窗超时关闭次数（涨=收不到飞控帧）
 // v32.29：运行健康诊断（网页日志显示，专治「灯全灭、日志也不动」这类现场问题）
 int  webGetTxRate();     // 每秒真正推给灯带的帧数（0 = 主循环没跑或 RMT 废了）
 int  webGetTxFail();     // RMT 发送失败累计（涨过 = 输出被打断过）

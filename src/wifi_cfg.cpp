@@ -124,7 +124,7 @@ static void touchHttp() {
 //   ble/dns/fc/msp/bdiag/boot —— 调试区与「连接」页用
 static void sendState(httpd_req_t* req) {
     // boot 字符串本身约 170 字节，加上其余字段整条 500 上下，1400 留足余量
-    char buf[1400];
+    char buf[1500];   // v32.32：加了 bleen/capd 两个字段，留足余量
     // v32.27：把最近一帧前 4 颗灯的「线路原始字节」也吐给网页（形如 00FF00 00FF00 …）。
     // 飞控设成纯红时：原始字节里哪个位置是 FF，就说明字节序是哪个 —— 排颜色问题时
     // 不用猜、也不用插 USB 看串口，网页日志里直接能对。
@@ -137,7 +137,7 @@ static void sendState(httpd_req_t* req) {
              "\"ble\":\"%s\",\"dns\":%d,\"fc\":%lu,\"msp\":\"%s\",\"bdiag\":\"%s\",\"boot\":\"%s\","
              "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
              "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"ghost\":%u,\"mute\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
-             "\"dropb\":%u,\"cap\":%u,\"ratio\":%d,\"need\":%d,"
+             "\"dropb\":%u,\"cap\":%u,\"ratio\":%d,\"need\":%d,\"bleen\":%d,\"capd\":%d,"
              // v32.29：健康诊断
              "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
              "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u}",
@@ -156,6 +156,7 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxLoMaxNs, (unsigned)g_rxThrNs,
              (unsigned)g_rxDropBits, (unsigned)g_rxCapUs,
              webGetRatio(), webGetFcNeed(),
+             webGetBleAdv(), webGetCapDrop(),
              webGetTxRate(), webGetTxFail(), webGetLoopGap(),
              webGetFcSilent(), webGetRxReset(),
              (unsigned)g_rxBits, (unsigned)g_rxMisalign,
@@ -202,6 +203,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "bright", v, sizeof(v)) == ESP_OK) webSetBright(atoi(v));
         if (httpd_query_key_value(q, "count",  v, sizeof(v)) == ESP_OK) webSetCount(atoi(v));
         if (httpd_query_key_value(q, "ford",   v, sizeof(v)) == ESP_OK) webSetFcOrder(atoi(v));
+        if (httpd_query_key_value(q, "bleen",  v, sizeof(v)) == ESP_OK) webSetBleAdv(atoi(v)); // v32.32
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

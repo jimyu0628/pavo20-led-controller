@@ -119,6 +119,11 @@ static volatile int s_mtu = 23;        // 当前 MTU（默认 23）
 static volatile int s_sub = 0;         // CCCD 是否已订阅
 static volatile int s_probe = -1;      // MSP 探测：-1 未测 / 0 飞控无回复 / 1 有回复
 static volatile int s_bleOn = 0;       // v32.20：BLE 是否在跑（1=广播/连接中，0=已关闭省电）
+// v32.32：广播总开关（网页「连接」页可关）。默认关 —— 只有要用手机蓝牙调参时才开。
+// 原因：C3 是单射频，WiFi 与 BLE 分时用；BLE 广播事件会打断灯带数据流，
+// 而这台板子的灯带输出对中断延迟极其敏感（旧版 RMT 无 DMA，见 led_out.cpp 文件头）。
+// 不广播时协议栈仍在（UART1 透传、TCP 调参照常），只是不再发 adv 包。
+static volatile int s_advAllowed = 0;
 
 // 未订阅期间暂存的飞控回包（订阅一开就补发）
 #define PEND_CAP 512
@@ -215,6 +220,7 @@ static const ble_uuid16_t abf_nt_uuid  = BLE_UUID16_INIT(0xABF2);
 const char* bleUartState(void) {
     if (!s_bleOn) return "ble off"; // v32.20：闲置超时或网页主动关闭
     if (s_initErr) return "ble err";
+    if (!s_advAllowed) return "ble idle"; // v32.32：协议栈在跑但按用户意愿不广播
     if (!s_advOk) return "ble adv fail";
     if (!s_connected) return "ble adv";
     return s_sub ? "ble conn" : "ble conn(no sub)";
@@ -567,6 +573,11 @@ static void uart_rx_task(void* arg) {
 
 // ---------------- NimBLE 主机事件 ----------------
 static void on_sync(void) {
+    // v32.32：开机不再无条件广播，按网页开关（NVS 里的 bleen）决定
+    if (!s_advAllowed) {
+        printf("[BLE] 协议栈就绪，按设置不广播（要用手机调参时到「连接」页打开）\n");
+        return;
+    }
     adv_start(); // 公共地址广播（C3 有出厂 MAC），无需地址类型推断
 }
 
@@ -619,4 +630,30 @@ void bleUartInit(void) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         probeTask(NULL);
     }, "mspProbe0", 2560, NULL, 4, NULL);
+}
+
+// ---------------- v32.32：广播开关 ----------------
+// 网页「连接」页的开关调它。要点：只切广播，**不动协议栈**。
+// 旧版 bleUartStop() 会 nimble_port_deinit()，关掉就必须重启才能恢复 ——
+// 那就没法做成开关了。这里 ble_gap_adv_stop() 之后随时可以再 adv_start()。
+bool bleUartAdvAllowed(void) { return s_advAllowed != 0; }
+
+void bleUartSetAdv(bool on) {
+    s_advAllowed = on ? 1 : 0;
+    if (!s_bleOn || s_initErr) return;   // 协议栈还没起来：只记下意愿，on_sync 时生效
+
+    if (on) {
+        if (!s_advOk) adv_start();
+    } else {
+        // 先断已连的手机（继续连着 WiFi 会一直为它保持射频活跃），再停广播
+        if (s_connected && s_connHandle) {
+            ble_gap_terminate(s_connHandle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        s_connected = 0;
+        s_sub = 0;
+        s_subHandle = 0;
+        s_connHandle = 0;
+        ble_gap_adv_stop();
+        s_advOk = 0;
+    }
 }

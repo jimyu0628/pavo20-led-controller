@@ -98,6 +98,9 @@ static int s_calCount = STRIP_DEFAULT_LEDS;   // 标定过程中的计数
 // v32.23：飞控侧 LED 字节顺序（0=GRB 1=RGB 2=BRG 3=RBG 4=GBR 5=BGR），断电记忆
 // v32.27：出厂默认改成 5(BGR) —— 这台飞控 + 这条灯带实测只有 BGR 颜色才对
 static int s_fcOrder = 5;
+// v32.32：BLE 广播开关（0=关，默认）。C3 单射频，BLE 广播会打断灯带数据流 → 频闪；
+// 只有要用手机 App 蓝牙调参时才需要开。断电记忆。
+static int s_bleAdv = 0;
 // 灯带显示缓冲 + 实际显示长度
 static RGB s_strip[STRIP_MAX_LEDS];
 static int s_stripLen = STRIP_DEFAULT_LEDS;
@@ -140,6 +143,7 @@ static void loadPrefs() {
     s_calibCount = nvsGetU16("calib", STRIP_DEFAULT_LEDS);
     s_fcOrder    = nvsGetU8("ford", 5);   // v32.27：飞控字节顺序，默认 BGR
     if (s_fcOrder < 0 || s_fcOrder > 5) s_fcOrder = 5;
+    s_bleAdv     = nvsGetU8("bleen", 0);  // v32.32：BLE 广播开关，默认关
     fcSetRxOrder(s_fcOrder);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
@@ -157,6 +161,7 @@ static void savePrefs() {
     nvsPutU8("bpct", (uint8_t)s_brightPct);
     nvsPutU16("calib", (uint16_t)s_calibCount);
     nvsPutU8("ford", (uint8_t)s_fcOrder);
+    nvsPutU8("bleen", (uint8_t)s_bleAdv);
 }
 // ---------- 显示 ----------
 static void refreshStrip() {
@@ -296,6 +301,7 @@ int webGetCalib()  { return s_calibCount; }
 int webGetRatio()  { return currentRatio(); }
 int webGetFcNeed() { int r = currentRatio(); return (s_calibCount + r - 1) / r; }
 int webGetFcOrder(){ return s_fcOrder; }      // v32.23：飞控字节顺序索引 0~5
+int webGetBleAdv() { return s_bleAdv; }       // v32.32：BLE 广播开关 0/1
 bool webIsCalibrating() { return s_calibrating; }
 // ---------- v32.29：运行健康诊断（网页日志要看到，不然只能靠猜） ----------
 // 这三项专治「跑一段时间灯全灭、日志也不动」这类现场说不清的问题：
@@ -307,11 +313,16 @@ static volatile uint32_t s_lpMaxMs = 0;   // 主循环最大间隔（ms）
 static uint32_t s_txRate = 0;             // 每秒发送帧数
 static uint32_t s_fcSilentS = 0;          // 距上一帧飞控信号的秒数
 static uint32_t s_rxResetN = 0;           // 采集自愈次数
+// v32.32：采集窗管理（旧版窗口可能一直开着，ISR 反复屏蔽中断把整机拖慢）
+static uint32_t s_capWinMs = 0;           // 本次开窗时刻（0=窗口没开）
+static uint32_t s_capRetryMs = 0;         // 无帧退避截止时刻
+static uint32_t s_capWinDrop = 0;         // 窗口超时关闭次数（涨=收不到帧）
 int webGetTxRate()  { return (int)s_txRate; }
 int webGetTxFail()  { return (int)g_txFail; }
 int webGetLoopGap() { return (int)s_lpMaxMs; }
 int webGetFcSilent(){ return (int)s_fcSilentS; }
 int webGetRxReset() { return (int)s_rxResetN; }
+int webGetCapDrop() { return (int)s_capWinDrop; }
 // 状态写入（HTTP handler task 调用；int 赋值原子，无需锁）
 void webSetMode(int v)   { if (v >= 0 && v < MODE_COUNT)  { s_mode = v; s_fxPhase = 0; savePrefs(); } }
 void webSetColor(int v)  { if (v >= 0 && v < COLOR_COUNT) { s_colorIdx = v; savePrefs(); } }
@@ -324,6 +335,15 @@ void webSetFcOrder(int v) {
     fcSetRxOrder(v);
     savePrefs();
     logMsg("[RX] 飞控字节顺序 = %s\n", fcRxOrderName());
+}
+// v32.32：BLE 广播开关。开着才能用手机 App 蓝牙调参；关着干扰最小（推荐默认关）。
+void webSetBleAdv(int v) {
+    int on = v ? 1 : 0;
+    if (on == s_bleAdv && bleUartAdvAllowed() == (on != 0)) return;
+    s_bleAdv = on;
+    bleUartSetAdv(on != 0);
+    savePrefs();
+    logMsg("[BLE] 广播开关 = %s\n", on ? "开（手机可搜到）" : "关（不影响灯带与 WiFi 调参）");
 }
 
 // 网页设置 LED 数量（等价于按键标定：只记总数，红蓝按比例自动分配）
@@ -380,6 +400,8 @@ extern "C" void app_main(void) {
                (int)got, (int)got / 4, tp == ESP_OK ? "ok" : "fail");
     }
     bleUartInit(); // BLE NUS 透传（SpeedyBee App 蓝牙调参）
+    // v32.32：按上电记忆决定是否广播（默认关）。协议栈本身常驻，网页随时可开关。
+    bleUartSetAdv(s_bleAdv != 0);
     mspTcpInit();  // v32.10：MSP over TCP 5761，PC 端 BF Configurator 走 WiFi 直连
     // 开机自检：v32.14 从「全白 255 亮 1s」改为「低亮度绿色 300ms」。
     // 20 颗 WS2812 全白 255 峰值约 1.2A，BEC 上会瞬时压降；绿色单通道 + 约 16% 占空
@@ -450,9 +472,9 @@ extern "C" void app_main(void) {
                    urx - lastUrx, utx - lastUtx, bleUartDiag(), mspTcpDiag());
             // v32.29：主循环卡顿/采集自愈（有才打，正常时一行都不多）
             if (s_lpMaxMs > 100) {
-                logMsg("[LOOP] 主循环最长间隔 %lums（正常约 10ms）｜采集自愈 %lu 次｜飞控静默 %lus\n",
+                logMsg("[LOOP] 主循环最长间隔 %lums（正常约 10ms）｜采集自愈 %lu 次｜窗口超时 %lu｜飞控静默 %lus\n",
                        (unsigned long)s_lpMaxMs, (unsigned long)s_rxResetN,
-                       (unsigned long)s_fcSilentS);
+                       (unsigned long)s_capWinDrop, (unsigned long)s_fcSilentS);
             }
             s_lpMaxMs = 0;   // 每秒归零，网页看到的是「最近一秒」的最大卡顿
             // v32.24：飞控解码质量单独一行（每 5 秒），便于判断「跳色」是不是解码错帧
@@ -482,28 +504,37 @@ extern "C" void app_main(void) {
             if (ev != BTN_NONE) handleButton(ev);
         }
         // 2) 飞控信号轮询
-        //    v32.29【关键】采集窗与灯带发送必须互斥。
-        //    本板 RMT 无 DMA：一帧 45 颗要 1.4ms，靠中断每 80µs 续填一次 FIFO。
-        //    而飞控采集为了测准位宽要屏蔽全部中断 1.3ms —— 两者重叠就是
-        //    RMT 断流 → 灯珠收到残帧（前段新色、后段旧色 = 亮部杂色），
-        //    狠了通道直接卡死 → 灯带再也不动（全灭，只能重启）。
-        //    现在的节奏：灯带这一帧确实发完(ledOutWaitIdle) → 开采集窗 →
-        //    收到一帧立刻关窗 → 渲染 + 发送 → 再开窗。
+        //    v32.32：输出已经换成 SPI+DMA，DMA 搬运不依赖中断，采集那 1.3ms 的
+        //    中断屏蔽不会再掐断灯带数据流（旧版 RMT 无 DMA，就是靠中断每 60µs
+        //    续填 FIFO，一屏蔽就断流 → 频闪/残帧/通道卡死）。所以这里不再要求
+        //    「发送彻底结束后才开窗」，只保留接口调用，时序结构不变。
+        //    新增一条保护：采集窗不会无限开着 —— 开窗后 200ms 还没收到帧就关窗
+        //    并退避 200ms，免得 ISR 一直占着中断把整机拖慢（这也是旧版「死机」的帮凶）。
         bool wantFc = (s_mode == 0 || s_calibrating);
         if (wantFc) {
-            if (!fcRxActive()) {
-                ledOutWaitIdle();      // 等 RMT 把这帧送完，再让 ISR 去屏蔽中断
+            if (!fcRxActive() && (int32_t)(now - s_capRetryMs) >= 0) {
+                ledOutWaitIdle();
                 fcRxSetActive(true);
+                s_capWinMs = now;
+                if (s_capWinMs == 0) s_capWinMs = 1;
             }
         } else if (fcRxActive()) {
             fcRxSetActive(false);
+            s_capWinMs = 0;
+        }
+        if (fcRxActive() && s_capWinMs && (now - s_capWinMs) > 200) {
+            fcRxSetActive(false);               // 200ms 没帧：先还给系统
+            s_capWinMs = 0;
+            s_capRetryMs = now + 200;           // 退避 200ms 再开窗
+            s_capWinDrop++;
         }
         if ((uint32_t)g_rxSeen != lastSeen) {
             lastSeen = (uint32_t)g_rxSeen;
             s_lastFcMs = now;          // 标定期间也要，免得退出标定误判超时
         }
         if (pollFcInput(&frame)) {
-            fcRxSetActive(false);      // 收到就把中断还回去：RMT/射频/按键都要它
+            fcRxSetActive(false);      // 收到就把中断还回去：射频/按键都要它
+            s_capWinMs = 0;
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
                 updateCalibDisplay();
