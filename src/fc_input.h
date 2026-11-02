@@ -27,12 +27,13 @@ void fcInputInit();
 // v32.26 起不再整帧丢弃（采集已可靠），只有「不足 1 颗灯」的残片会被丢掉
 bool pollFcInput(FcFrame* out);
 
-// v32.26：采集开关。只有 Betaflight 模式(0)或标定中才需要飞控帧 ——
-// 因为采集期间要屏蔽全部中断约 1.4ms，本地灯效运行时没必要付这个代价。
+// v32.26：采集开关。只有 Betaflight 模式(0)、标定中、以及 v32.36 起的「灯效模式
+// 短窗嗅探」才需要飞控帧 —— 前者要每帧，后者每 400ms 只抓一帧看飞控的 LED 开关。
 // v32.29【重要】它同时是「输出/输入互斥」：本板 WS2812 输出（RMT）无 DMA，
 // 靠中断每 80µs 续填 FIFO，与采集的 1.4ms 中断屏蔽撞上就会断流 →
 // 灯珠收到残帧 → 亮部出现杂色，狠了通道卡死 → 灯带动不了。
-// 主循环必须：发完一帧才 fcRxSetActive(true)，收到一帧立刻 fcRxSetActive(false)。
+// v32.32 起输出换成 SPI+DMA，DMA 搬运不依赖中断，这条互斥已不复存在；
+// 但开窗仍然要短（收到一帧立刻关），别让 ISR 长期占着 CPU。
 void fcRxSetActive(bool on);
 bool fcRxActive();
 

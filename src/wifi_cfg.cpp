@@ -146,6 +146,9 @@ static void sendState(httpd_req_t* req) {
              "\"ford\":%d,\"fordn\":\"%s\",\"lend\":%u,\"head\":\"%s\","
              "\"bad\":%u,\"frag\":%u,\"clamp\":%u,\"ghost\":%u,\"mute\":%u,\"hmin\":%u,\"hmax\":%u,\"lomax\":%u,\"thr\":%u,"
              "\"dropb\":%u,\"cap\":%u,\"ratio\":%d,\"need\":%d,\"bleen\":%d,\"capd\":%d,"
+             // v32.36：灯效模式与飞控开关（fcctl=接不接管，fcled=飞控要亮还是要灭，
+             // fclive=最近有没有读到飞控状态 —— 0 就是没信号，此时灯效常亮）
+             "\"fcctl\":%d,\"fcled\":%d,\"fclive\":%d,"
              // v32.29：健康诊断
              "\"tx\":%d,\"txf\":%d,\"lpm\":%d,\"sil\":%d,\"rxs\":%d,"
              "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u,"
@@ -168,6 +171,7 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxDropBits, (unsigned)g_rxCapUs,
              webGetRatio(), webGetFcNeed(),
              webGetBleAdv(), webGetCapDrop(),
+             webGetFcCtl(), webGetFcLed(), webGetFcLive(),
              webGetTxRate(), webGetTxFail(), webGetLoopGap(),
              webGetFcSilent(), webGetRxReset(),
              (unsigned)g_rxBits, (unsigned)g_rxMisalign,
@@ -218,6 +222,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "count",  v, sizeof(v)) == ESP_OK) webSetCount(atoi(v));
         if (httpd_query_key_value(q, "ford",   v, sizeof(v)) == ESP_OK) webSetFcOrder(atoi(v));
         if (httpd_query_key_value(q, "bleen",  v, sizeof(v)) == ESP_OK) webSetBleAdv(atoi(v)); // v32.32
+        if (httpd_query_key_value(q, "fcctl",  v, sizeof(v)) == ESP_OK) webSetFcCtl(atoi(v));  // v32.36
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

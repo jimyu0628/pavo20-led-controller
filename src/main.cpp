@@ -147,6 +147,29 @@ static int s_stripLen = STRIP_DEFAULT_LEDS;
 static bool s_fcActive = false;   // true=飞控正在接管显示（仅飞控模式）
 static bool s_fcBlanked = false;  // v32.35：已因信号丢失灭过灯（避免每秒重复清屏）
 static uint32_t s_lastFcMs = 0;   // 最后一次有效飞控帧时间（只认「已解出并上屏」的帧）
+// ---------- v32.36：灯效模式(1~9)也听飞控的「开关」 ----------
+// 需求：除 Betaflight 模式外的 9 个本地灯效，**没检测到飞控信号时常亮**（灯效照跑），
+//       **检测到飞控信号时，亮/灭由飞控决定**（飞控那边把 LED 关掉 → 本板跟着灭）。
+// 实现要点：灯效模式不再完全关掉采集，而是每隔 FC_SNIFF_MS 开一个很短的窗口
+//       （FC_SNIFF_WIN_MS）抓一帧，只为了读「这一帧是不是全黑」——
+//       颜色/效果仍然 100% 按本地灯效渲染，飞控碰不到。
+//       没信号时线上根本没有边沿，ISR 不会进来，空窗口一分 CPU 都不占；
+//       收到帧就立刻关窗，所以开销是每 400ms 里 1~2ms，SPI+DMA 输出不受影响。
+#define FC_SNIFF_MS       400u   // 灯效模式多久嗅探一次
+#define FC_SNIFF_WIN_MS    60u   // 一次嗅探最多开窗多久（BF 帧率 30~100Hz，一帧必到）
+#define FC_SNIFF_HOLD_MS 2000u   // 这么久没嗅到帧 = 飞控不在 → 常亮
+// 判灭 / 判亮不对称，这是故意的：
+//   判「灭」要连续 FC_DARK_CONFIRM 次嗅探都是全黑（≈1.2 秒）—— 飞控自己的
+//     闪烁/呼吸效果会周期性发全黑帧，看单帧就跟它一起乱闪；
+//   判「亮」只要一帧有颜色立即生效 —— 开灯不能拖。
+#define FC_DARK_CONFIRM     3u
+static int  s_fcCtl     = 1;     // 1=灯效模式受飞控开关控制（默认开），0=完全不理飞控
+static bool s_fcLedOn   = true;  // 飞控当前要求：true=亮，false=灭（全黑帧）
+static uint8_t s_darkRun = 0;    // 连续几次嗅探都是全黑（见下：判灭要「持续」，判亮要「立即」）
+static bool s_fxDimmed  = false; // 上一次输出是「因飞控关灯而全灭」（只为少刷几帧）
+static uint32_t s_fcLedOnMs = 0; // 最后一次从飞控读到「开关状态」的时刻
+static uint32_t s_sniffNextMs  = 0; // 下次开嗅探窗的时刻
+static uint32_t s_sniffUntilMs = 0; // 本次嗅探窗的关闭时刻（0=窗口没开）
 // 效果帧节奏
 static uint32_t s_lastFxMs = 0;
 static int s_fxPhase = 0;
@@ -182,6 +205,8 @@ static void loadPrefs() {
     s_fcOrder    = nvsGetU8("ford", 5);   // v32.27：飞控字节顺序，默认 BGR
     if (s_fcOrder < 0 || s_fcOrder > 5) s_fcOrder = 5;
     s_bleAdv     = nvsGetU8("bleen", 0);  // v32.32：BLE 广播开关，默认关
+    s_fcCtl      = nvsGetU8("fcctl", 1);  // v32.36：灯效模式受飞控开关控制，默认开
+    if (s_fcCtl) s_fcCtl = 1;
     fcSetRxOrder(s_fcOrder);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
@@ -200,6 +225,7 @@ static void savePrefs() {
     nvsPutU16("calib", (uint16_t)s_calibCount);
     nvsPutU8("ford", (uint8_t)s_fcOrder);
     nvsPutU8("bleen", (uint8_t)s_bleAdv);
+    nvsPutU8("fcctl", (uint8_t)s_fcCtl);
 }
 // ---------- 显示 ----------
 static void refreshStrip() {
@@ -217,6 +243,30 @@ static int currentRatio() {
 // 飞控实际灯数：取历史最大值。ISR 进入时帧头那一位必然采不到（中断延迟），
 // 所以单帧解出的灯数偶尔会比真实值少 1~2 颗；用峰值当基准，缺的尾部沿用
 // 最后一颗的颜色，避免灯带末端出现一小段黑。
+// v32.36：判断飞控这一帧是不是「全黑」= 飞控此刻要求关灯。
+// 用和显示同一套暗切阈值（FC_DARK_CUT），免得飞控暗区 0x01~0x08 被当成「亮」。
+// 注意只看飞控**发出来的**那几颗，本板多余的部分不存在这个问题。
+static bool fcFrameAllDark(const FcFrame& f) {
+    if (f.count <= 0) return true;
+    for (int i = 0; i < f.count; i++) {
+        const RGB& c = f.leds[i];
+        if (c.r > FC_DARK_CUT || c.g > FC_DARK_CUT || c.b > FC_DARK_CUT) return false;
+    }
+    return true;
+}
+// v32.36：根据一帧飞控数据更新「它要不要亮」。
+//   判灭：连续 FC_DARK_CONFIRM 次全黑（≈1.2 秒）—— 飞控自己的闪烁/呼吸会周期性
+//         发全黑帧，只认单帧就会跟着一起闪；
+//   判亮：一帧有颜色立刻亮，不拖延。
+static void noteFcLedState(const FcFrame& f) {
+    if (fcFrameAllDark(f)) {
+        if (s_darkRun < FC_DARK_CONFIRM) s_darkRun++;
+        if (s_darkRun >= FC_DARK_CONFIRM) s_fcLedOn = false;
+    } else {
+        s_darkRun = 0;
+        s_fcLedOn = true;
+    }
+}
 static int s_fcPeak = 0;
 static uint8_t s_peakLowRun = 0;   // v32.30：连续「本帧比峰值少」的帧数
 // v32.35：一帧解出的灯数最多比基准多多少，多出来就按「解错了」处理。
@@ -376,6 +426,11 @@ int webGetRatio()  { return currentRatio(); }
 int webGetFcNeed() { int r = currentRatio(); return (s_calibCount + r - 1) / r; }
 int webGetFcOrder(){ return s_fcOrder; }      // v32.23：飞控字节顺序索引 0~5
 int webGetBleAdv() { return s_bleAdv; }       // v32.32：BLE 广播开关 0/1
+// v32.36：灯效模式的「飞控开关接管」。fcctl=是否启用；fcled=飞控当前要求亮(1)/灭(0)；
+// fclive=最近有没有从飞控读到状态（0 就是没信号，此时常亮）。
+int webGetFcCtl()  { return s_fcCtl; }
+int webGetFcLed()  { return s_fcLedOn ? 1 : 0; }
+int webGetFcLive() { return ((nowMs() - s_fcLedOnMs) <= FC_SNIFF_HOLD_MS) ? 1 : 0; }
 bool webIsCalibrating() { return s_calibrating; }
 // ---------- v32.29：运行健康诊断（网页日志要看到，不然只能靠猜） ----------
 // 这三项专治「跑一段时间灯全灭、日志也不动」这类现场说不清的问题：
@@ -425,6 +480,21 @@ void webSetBleAdv(int v) {
     logMsg("[BLE] 广播开关 = %s\n", on ? "开（手机可搜到）" : "关（不影响灯带与 WiFi 调参）");
 }
 
+// v32.36：灯效模式是否「听飞控的开关」。开着时每 400ms 嗅探一帧，只读全黑/非全黑。
+void webSetFcCtl(int v) {
+    int on = v ? 1 : 0;
+    if (on == s_fcCtl) return;
+    s_fcCtl = on;
+    if (!on) {
+        s_fcLedOn  = true;       // 关掉接管：立刻恢复常亮
+        s_darkRun  = 0;
+        s_sniffUntilMs = 0;      // 也不再开嗅探窗
+    }
+    savePrefs();
+    logMsg("[FC ] 灯效模式飞控开关 = %s\n",
+           on ? "接管（飞控关灯时本板跟着灭）" : "不接管（灯效一直亮）");
+}
+
 // 网页设置 LED 数量（等价于按键标定：只记总数，红蓝按比例自动分配）
 void webSetCount(int v) {
     if (s_calibrating) return; // 标定中不干预
@@ -443,7 +513,13 @@ void webApplyNow() {
             for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
             refreshStrip();
         }
+    } else if (s_fcCtl && !s_fcLedOn) {
+        // v32.36：飞控要求关灯时，切模式也别点亮（保持灭，等飞控开灯）
+        s_fxDimmed = true;
+        for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+        refreshStrip();
     } else {
+        s_fxDimmed = false;
         renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
         applyBrightness(s_strip, s_stripLen, brightScale());
         refreshStrip();
@@ -623,6 +699,16 @@ extern "C" void app_main(void) {
         //    新增一条保护：采集窗不会无限开着 —— 开窗后 200ms 还没收到帧就关窗
         //    并退避 200ms，免得 ISR 一直占着中断把整机拖慢（这也是旧版「死机」的帮凶）。
         bool wantFc = (s_mode == 0 || s_calibrating);
+        // v32.36：灯效模式(1~9)不再完全关掉采集 —— 每 FC_SNIFF_MS 开一个 60ms 的短窗，
+        // 抓一帧只为读「飞控现在要不要亮」。没接线时线上没有边沿，ISR 不进来，
+        // 空窗口不占 CPU；有信号时收到帧就立刻关窗（下面 pollFcInput 里清 s_sniffUntilMs）。
+        if (!wantFc && s_fcCtl) {
+            if (s_sniffUntilMs == 0 && (int32_t)(now - s_sniffNextMs) >= 0) {
+                s_sniffUntilMs = now + FC_SNIFF_WIN_MS;
+                if (s_sniffUntilMs == 0) s_sniffUntilMs = 1;
+            }
+            if (s_sniffUntilMs) wantFc = true;
+        }
         if (wantFc) {
             if (!fcRxActive() && (int32_t)(now - s_capRetryMs) >= 0) {
                 ledOutWaitIdle();
@@ -640,6 +726,12 @@ extern "C" void app_main(void) {
             s_capRetryMs = now + 200;           // 退避 200ms 再开窗
             s_capWinDrop++;
         }
+        // v32.36：嗅探窗到点就收工（不管有没有抓到帧），然后排下一次
+        if (s_sniffUntilMs && (int32_t)(now - s_sniffUntilMs) >= 0) {
+            s_sniffUntilMs = 0;
+            s_sniffNextMs  = now + FC_SNIFF_MS;
+            if (fcRxActive()) { fcRxSetActive(false); s_capWinMs = 0; }
+        }
         // v32.35【关键修正】「飞控还在不在」只能看**已经解出来的帧**（g_rxFrames），
         // 不能看 ISR 进了多少次（g_rxSeen）—— 进 ISR 不代表解出帧，噪声碎片、
         // 幽灵边沿都会让它涨。现场日志 `残片 732220 · 飞控静默 0s` 就是这个错：
@@ -653,6 +745,8 @@ extern "C" void app_main(void) {
         if (pollFcInput(&frame)) {
             fcRxSetActive(false);      // 收到就把中断还回去：射频/按键都要它
             s_capWinMs = 0;
+            s_sniffUntilMs = 0;        // v32.36：嗅探窗目的达到，立刻收工
+            s_sniffNextMs = now + FC_SNIFF_MS;
             s_fcBlanked = false;       // v32.35：帧回来了，允许下次断线时重新灭灯
             if (s_calibrating) {
                 s_calCount = computeCalCount(frame.leds, frame.count);
@@ -661,7 +755,22 @@ extern "C" void app_main(void) {
                 stageMark(STAGE_FCMAP);
                 mapFcToStrip(frame);
                 s_fcActive = true;
+                // v32.36：模式 0 也顺手记一下「飞控开关状态」，这样切到灯效模式的
+                // 那一刻就是对的，不会先亮 0.4 秒再灭。
+                noteFcLedState(frame);
+                s_fcLedOnMs = now;
+            } else if (s_fcCtl) {
+                // v32.36：灯效模式只读飞控的「开关」——连续几次全黑帧 = 飞控要求关灯。
+                // 颜色/效果一概不取，仍然是本地 9 种灯效自己渲染。
+                noteFcLedState(frame);
+                s_fcLedOnMs = now;
             }
+        }
+        // v32.36：2 秒没从飞控读到开关状态 = 飞控不在（没接/断电/没开 LED 输出）→ 常亮。
+        // 这是用户明确要的行为：本地灯效在没飞控时不该黑着。
+        if (s_mode != 0 && !s_calibrating && (now - s_fcLedOnMs) > FC_SNIFF_HOLD_MS) {
+            s_fcLedOn = true;
+            s_darkRun = 0;             // 没信号了，连续全黑计数作废
         }
         // 2.5) 不在飞控模式（或在标定）就别占着控制权：切走的那一刻立刻交还本地渲染，
         //      不必等 500ms 超时；顺手把帧计时回拨一拍，让灯效这一轮马上出图。
@@ -716,14 +825,25 @@ extern "C" void app_main(void) {
             }
         }
         // 4) 灯效模式渲染（非标定 && 无飞控接管 && 模式 1~9，按速度决定帧间隔）
+        //    v32.36：飞控在线且要求关灯时，这一段输出全黑（只推一次，不空转刷新）。
+        //    飞控一旦要求亮、或信号消失，就照常从原来的相位接着渲染，画面不会跳。
         if (!s_calibrating && !s_fcActive && s_mode != 0 &&
             (now - s_lastFxMs) >= fxIntervalMs()) {
             s_lastFxMs = now;
-            s_fxPhase++;
-            if (s_fxPhase >= 1000000) s_fxPhase = 0; // 防 int 溢出
-            renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
-            applyBrightness(s_strip, s_stripLen, brightScale());
-            refreshStrip();
+            if (s_fcCtl && !s_fcLedOn) {
+                if (!s_fxDimmed) {          // 刚变灭：推一帧全黑就够了
+                    s_fxDimmed = true;
+                    for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+                    refreshStrip();
+                }
+            } else {
+                s_fxDimmed = false;
+                s_fxPhase++;
+                if (s_fxPhase >= 1000000) s_fxPhase = 0; // 防 int 溢出
+                renderEffect(s_strip, s_stripLen, s_mode, COLORS[s_colorIdx], s_fxPhase);
+                applyBrightness(s_strip, s_stripLen, brightScale());
+                refreshStrip();
+            }
         }
         delayMs(1);
     }

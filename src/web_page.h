@@ -530,6 +530,12 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
     <div class="kv"><span class="k">波特率</span><span class="v">115200</span></div>
     <div class="kv"><span class="k">LED 数据帧</span><span class="v" id="fcFrames">—</span></div>
     <div class="kv"><span class="k">灯色字节顺序</span><span class="v"><button class="ordbtn" id="fcOrder" type="button">—</button></span></div>
+    <div class="kv" id="fcCtlRow" style="cursor:pointer">
+      <span class="k">灯效模式听飞控开关</span>
+      <span class="v"><span class="switch ios" id="fcCtlSw" role="switch" aria-checked="true"></span></span>
+    </div>
+    <div class="kv"><span class="k">飞控 LED 状态</span><span class="v" id="fcLedNow">—</span></div>
+    <div class="note">本地 9 个灯效：<b>没接飞控就常亮</b>；接上后亮/灭跟着飞控走（飞控把 LED 关掉这边就灭，颜色仍按本地灯效）。</div>
     <div class="kv"><span class="k">网络调参端口</span><span class="v mono" id="mspUrl">tcp://192.168.4.1:5761</span></div>
     <div class="kv"><span class="k">TCP 客户端</span><span class="v mono" id="mspState">—</span></div>
     <div class="note">电脑端 Betaflight 配置器选 <b>Manual Selection</b>，填 <b>tcp://192.168.4.1:5761</b>。</div>
@@ -1230,6 +1236,51 @@ function toggleBle(){
   req.send("bleen=" + on);
 }
 
+/* ================= 连接页：灯效模式听飞控开关 ================= */
+/* v32.36：9 个本地灯效在「没飞控」时保持常亮；接上飞控后亮/灭跟着飞控走
+   （飞控发全黑帧 = 它把 LED 关掉了，这边跟着灭；颜色仍是本地灯效）。
+   fcctl=是否接管，fcled=飞控要亮(1)/灭(0)，fclive=最近有没有读到飞控状态。 */
+function renderFcCtl(){
+  var sw = $("fcCtlSw");
+  if(sw) sw.classList.toggle("on", (st.fcctl|0) === 1);
+  var n = $("fcLedNow");
+  if(!n) return;
+  if((st.fcctl|0) !== 1){
+    n.textContent = "不接管 · 灯效一直亮";
+  }else if((st.fclive|0) !== 1){
+    n.textContent = "无飞控信号 · 常亮";
+  }else if((st.fcled|0) === 1){
+    n.textContent = "飞控要求：亮";
+  }else{
+    n.textContent = "飞控要求：灭";
+  }
+}
+function toggleFcCtl(){
+  var on = ((st.fcctl|0) === 1) ? 0 : 1;
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 8000;
+  req.onload = function(){
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.fcctl === "number"){
+      st.fcctl = j.fcctl; st.fcled = j.fcled; st.fclive = j.fclive;
+      renderFcCtl();
+      toast(j.fcctl ? "已接管：飞控关灯时本板跟着灭，没飞控则常亮"
+                    : "已关闭接管：灯效一直亮，不看飞控");
+    }else{
+      renderFcCtl();
+      toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    renderFcCtl();
+    toast("设置失败：确认手机还连着本热点");
+  };
+  req.send("fcctl=" + on);
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1263,7 +1314,11 @@ function absorb(j){
   }
   /* v32.32：BLE 广播开关（同样不属于「待应用」的 5 项，直接跟设备同步） */
   if(typeof j.bleen === "number") st.bleen = j.bleen;
+  if(typeof j.fcctl === "number") st.fcctl = j.fcctl;
+  if(typeof j.fcled === "number") st.fcled = j.fcled;
+  if(typeof j.fclive === "number") st.fclive = j.fclive;
   renderBleSw();
+  renderFcCtl();
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
 }
@@ -1376,6 +1431,11 @@ function renderDev(j){
             "[RX  ] 飞控静默 " + (j.sil|0) + "s（距上一帧**解出来**的帧，不是中断次数）" +
                      ((j.sil|0) > 2 ? " —— 真收不到了！" : "") + "\n" +
             "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
+            // v32.36：本地 9 个灯效现在会看飞控的「开关」——这一行专门说清楚现状，
+            // 不然「灯效突然灭了」会让人以为又出 bug。
+            "[FC  ] 灯效模式 " + ((j.fcctl|0) !== 1 ? "不接管（一直亮）"
+                     : ((j.fclive|0) !== 1 ? "无飞控信号 · 常亮"
+                     : ((j.fcled|0) === 1 ? "飞控要求亮" : "飞控要求灭（跟着灭）"))) + "\n" +
             "[BOOT] " + (j.boot||"?") + "\n" +
             "[BOOT] 复位 " + rsn + lastSt;
   if(dbgOn && !logPaused) $("logbox").textContent = logText;
@@ -1541,6 +1601,10 @@ function toast(t){
 /* ================= 连接页：BLE 广播开关 ================= */
 var bleRow = $("bleRow");
 if(bleRow) bleRow.addEventListener("click", toggleBle);
+
+/* v32.36：连接页 —— 灯效模式听飞控开关（点整行都能切） */
+var fcCtlRow = $("fcCtlRow");
+if(fcCtlRow) fcCtlRow.addEventListener("click", toggleFcCtl);
 
 /* ================= 设备页：日志开关 ================= */
 $("dbgRow").addEventListener("click", function(){
