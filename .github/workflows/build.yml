@@ -14,6 +14,13 @@ name: Build ESP32-C3 Firmware
 on:
   push:
     branches: [ main, master ]
+    # 只改文档不算改固件，别白跑一次编译（以前每版都跑两条：代码一条、文档一条）
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.workbuddy/**'
+      - 'demo/**'
+      - 'tools/**'
   workflow_dispatch:   # 允许在 Actions 页面手动触发
     inputs:
       backtrace:
