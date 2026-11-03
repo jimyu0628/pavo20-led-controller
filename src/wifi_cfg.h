@@ -63,6 +63,13 @@ int  webGetFcCtl();      // 是否启用接管 0/1
 int  webGetFcLed();      // 飞控当前要求：1=亮 0=灭
 int  webGetFcLive();     // 1=最近有从飞控读到状态（有信号）0=没信号（此时常亮）
 void webSetFcCtl(int v); // 开/关接管，即时生效，断电记忆
+// v32.37：单颗跳变抑制 —— 纯色时「个别灯随机亮/灭」的输出端兜底。
+//   diff=本帧与上一帧不同的颗数，isol=被判成孤立跳变而沿用上一帧的颗数。
+//   纯红静止时两个数都应接近 0；长期非 0 且大幅波动 = 解出来的帧本身在变。
+int  webGetGlitchFix();
+int  webGetOutDiff();
+int  webGetOutIsol();
+void webSetGlitchFix(int v);
 // v32.33：上次重启前执行到哪一步（崩溃落点）· 崩之前跑了多少秒
 //   靠 RTC 内存跨重启保存，专治「死机了但看不到任何现场」——
 //   配「复位原因」一起看：PANIC/看门狗 + 落点，就能缩到具体哪个函数。

@@ -80,6 +80,14 @@ extern volatile uint32_t g_rxNear;     // v32.29：高/低比值接近 1 的「�
 extern volatile uint32_t g_rxMisalign; // v32.33：帧内有断流/毛刺/合并的帧数（颜色可能错位）
 extern volatile uint32_t g_rxBits;     // v32.29：最近一帧的原始 bit 数
 extern volatile uint32_t g_rxGap;      // v32.33：最近一帧的「断流位」数（一位时长超过 2 个周期）
+// v32.37：治「纯色时个别灯随机亮」的两个硬指标
+//   g_rxHaveMin/Max —— 最近 100 帧「解出颗数」的波动范围。差 >3 说明帧头丢位在抖，
+//                      帧尾对齐后帧头那几颗每帧都要「保持上一帧」，图案就会左右挪。
+//   g_rxGapMs       —— 连续两帧的间隔。正常 20~50ms；掉到 1~2ms 说明两帧被当成一帧采了
+//                      （那种帧前半截和后半截来自不同时刻，亮起来一半对一半乱）。
+extern volatile uint32_t g_rxHaveMin;
+extern volatile uint32_t g_rxHaveMax;
+extern volatile uint32_t g_rxGapMs;
 extern volatile uint16_t g_rxGapMaxNs; // v32.33：最近一帧最长的一位时长（正常 = 位周期）
 extern volatile uint16_t g_rxPeriodNs; // v32.29：实测位周期（ns）
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）

@@ -170,6 +170,38 @@ static bool s_fxDimmed  = false; // 上一次输出是「因飞控关灯而全�
 static uint32_t s_fcLedOnMs = 0; // 最后一次从飞控读到「开关状态」的时刻
 static uint32_t s_sniffNextMs  = 0; // 下次开嗅探窗的时刻
 static uint32_t s_sniffUntilMs = 0; // 本次嗅探窗的关闭时刻（0=窗口没开）
+// ---------- v32.37：单颗跳变抑制 ----------
+// 现场「BF 纯红时各个灯随机亮/灭」在软件侧只剩一个来源：某一帧里某几个位判错，
+// 那颗灯的颜色整颗变了（红 → 黑，或红 → 暗红）。特征是**孤立**：
+//   · 相邻灯珠这一帧都没变（真的图案变化，比如扫描/彩虹，是一片一起动的）
+//   · 它下一帧又回到原值（电气噪声造成的瞬时误判，不是飞控真的在让它闪）
+// 所以判定很简单：本颗变化很大、左右邻居几乎没变 → 先沿用上一帧；
+// 连续 3 帧都这样才认账（防止把 BF 真正的「单颗灯闪」效果当成噪声吃掉）。
+// 这一步不改解码、不改时序，纯输出端兜底，所以对已经正确的帧零影响。
+#define GFIX_BIG_DIFF   72     // 本颗变化超过它才算「跳」
+#define GFIX_NEI_DIFF   28     // 邻居变化小于它算「没动」
+#define GFIX_HOLD_MAX   2      // 连续这么多次都孤立 → 认账（第 3 帧起照实显示）
+static int s_gfix = 1;         // 1=开（默认），0=关；断电记忆
+static RGB     s_prevOut[STRIP_MAX_LEDS]; // 上一帧实际送出去的颜色
+static uint8_t s_gfixHold[STRIP_MAX_LEDS];
+static RGB     s_newOut[STRIP_MAX_LEDS];  // v32.37：本帧算出来的候选值（两遍处理用）
+volatile uint32_t g_outDiff = 0;  // 本帧与上一帧有多少颗不同（不管有没有被抑制）
+volatile uint32_t g_outIsol = 0;  // 本帧被「孤立跳变」抑制掉的颗数
+static inline int colDist(const RGB& a, const RGB& b) {
+    int d = (int)a.r - (int)b.r; if (d < 0) d = -d;
+    int e = (int)a.g - (int)b.g; if (e < 0) e = -e; if (e > d) d = e;
+    int f = (int)a.b - (int)b.b; if (f < 0) f = -f; if (f > d) d = f;
+    return d;
+}
+// 清屏 / 模式切换时把「上一帧」也清掉，免得抑制逻辑拿旧颜色当参考
+static void resetOutHistory() {
+    for (int i = 0; i < STRIP_MAX_LEDS; i++) {
+        s_prevOut[i] = RGB();
+        s_gfixHold[i] = 0;
+    }
+    g_outDiff = 0;
+    g_outIsol = 0;
+}
 // 效果帧节奏
 static uint32_t s_lastFxMs = 0;
 static int s_fxPhase = 0;
@@ -207,6 +239,8 @@ static void loadPrefs() {
     s_bleAdv     = nvsGetU8("bleen", 0);  // v32.32：BLE 广播开关，默认关
     s_fcCtl      = nvsGetU8("fcctl", 1);  // v32.36：灯效模式受飞控开关控制，默认开
     if (s_fcCtl) s_fcCtl = 1;
+    s_gfix       = nvsGetU8("gfix", 1);   // v32.37：抑制单颗跳变，默认开
+    if (s_gfix) s_gfix = 1;
     fcSetRxOrder(s_fcOrder);
     if (s_mode < 0 || s_mode >= MODE_COUNT) s_mode = DEFAULT_MODE;
     if (s_colorIdx < 0 || s_colorIdx >= COLOR_COUNT) s_colorIdx = 0;
@@ -226,6 +260,7 @@ static void savePrefs() {
     nvsPutU8("ford", (uint8_t)s_fcOrder);
     nvsPutU8("bleen", (uint8_t)s_bleAdv);
     nvsPutU8("fcctl", (uint8_t)s_fcCtl);
+    nvsPutU8("gfix", (uint8_t)s_gfix);
 }
 // ---------- 显示 ----------
 static void refreshStrip() {
@@ -312,27 +347,60 @@ static void mapFcToStrip(const FcFrame& frame) {
     if (off < 0) off = 0;
     // v32.35：偏移太离谱 = 这帧不是正常帧尾对齐，宁可扔掉也不要把整条画面冻住
     if (off > FC_PEAK_JUMP_MAX * 2) return;
+
+    // ---------- 第一遍：算出这一帧「想显示」的颜色 ----------
+    int diffN = 0;
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
-        if (src >= fc) { s_strip[i] = RGB(); continue; }  // 超出飞控灯数：灭
-        int j = src - off;                 // 换算到本帧的下标
-        if (j < 0) continue;               // 帧头丢掉的几颗：保持上一帧，别闪一下黑
-        if (j >= have) continue;
-        RGB c = frame.leds[j];
-        // v32.31 暗切：飞控在「不亮」的区域并不是给 0，而是给一个极小的值 ——
-        // 现场实测 BF 亮度 100 时暗区就是 0x08（8/255 = 3%），亮度 11 时是 0x01。
-        // 本板再乘 42% 亮度后落在 1/255 附近，暗环境里就是那层「弱光」。
-        // v32.33【保色相】原来逐通道切会把颜色渐变的尾巴切歪：紫 = R+B，扫描条纹
-        // 边缘 R=15 / B=8 时 B 被切掉、R 留着 → 冒出一段纯红；另一侧正好反过来
-        // → 冒出一段纯蓝。用户看到的「亮部前后蓝红分离」有一半是它造成的
-        // （另一半是真临界位判错，已在 fc_input 里改判据）。
-        // 改成整颗判定：三通道最大值都不超过门限才整颗归零，色相永远不动。
-        uint8_t mx = c.r;
-        if (c.g > mx) mx = c.g;
-        if (c.b > mx) mx = c.b;
-        if (mx <= FC_DARK_CUT) c = RGB();
-        s_strip[i] = c;
+        RGB c;
+        if (src >= fc) {
+            c = RGB();                         // 超出飞控灯数：灭
+        } else {
+            int j = src - off;                 // 换算到本帧的下标（帧尾锚定）
+            if (j < 0 || j >= have) {
+                c = s_prevOut[i];              // 帧头丢掉的几颗：保持上一帧，别闪一下黑
+            } else {
+                c = frame.leds[j];
+                // v32.31 暗切 …（见下）
+                uint8_t mx = c.r;
+                if (c.g > mx) mx = c.g;
+                if (c.b > mx) mx = c.b;
+                if (mx <= FC_DARK_CUT) c = RGB();
+            }
+        }
+        s_newOut[i] = c;
+        if (colDist(c, s_prevOut[i]) != 0) diffN++;
     }
+
+    // ---------- 第二遍：孤立跳变抑制（v32.37） ----------
+    // 见文件上方 s_gfix 的说明：邻居都没动、只有它跳到另一个值 → 先当误判。
+    int isoN = 0;
+    for (int i = 0; i < s_stripLen; i++) {
+        RGB c  = s_newOut[i];
+        RGB pv = s_prevOut[i];
+        if (s_gfix && colDist(c, pv) >= GFIX_BIG_DIFF) {
+            int dl = (i > 0)              ? colDist(s_newOut[i - 1], s_prevOut[i - 1]) : 999;
+            int dr = (i + 1 < s_stripLen) ? colDist(s_newOut[i + 1], s_prevOut[i + 1]) : 999;
+            if (dl < GFIX_NEI_DIFF && dr < GFIX_NEI_DIFF) {
+                if (s_gfixHold[i] < GFIX_HOLD_MAX) {
+                    s_gfixHold[i]++;
+                    c = pv;                    // 判定为瞬时误判：沿用上一帧
+                    isoN++;
+                }
+                // 连续 GFIX_HOLD_MAX 次都这样 → 这个「孤立变化」是真的（BF 的单颗效果），
+                // 从此不再抑制。注意这里**不要把计数清零**：清零会让它每 3 帧才放行 1 帧，
+                // 真的单颗闪烁反而变成慢速闪现；等它回到静止，下面的分支自然归零。
+            } else {
+                s_gfixHold[i] = 0;
+            }
+        } else {
+            s_gfixHold[i] = 0;
+        }
+        s_strip[i]    = c;
+        s_prevOut[i]  = c;
+    }
+    g_outDiff = (uint32_t)diffN;
+    g_outIsol = (uint32_t)isoN;
     refreshStrip();
 }
 // ---------- 标定模式 ----------
@@ -370,6 +438,7 @@ static void exitCalibration() {
            s_calibCount, currentRatio(),
            (s_calibCount + currentRatio() - 1) / currentRatio());
     for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+    resetOutHistory();
     refreshStrip();
 }
 // ---------- 按键事件处理 ----------
@@ -431,6 +500,21 @@ int webGetBleAdv() { return s_bleAdv; }       // v32.32：BLE 广播开关 0/1
 int webGetFcCtl()  { return s_fcCtl; }
 int webGetFcLed()  { return s_fcLedOn ? 1 : 0; }
 int webGetFcLive() { return ((nowMs() - s_fcLedOnMs) <= FC_SNIFF_HOLD_MS) ? 1 : 0; }
+// v32.37：单颗跳变抑制。gfix=开关；diff=本帧与上一帧不同的颗数；
+// isol=本帧被判成「孤立跳变」而没显示出去的颗数。
+//   纯红静止时 diff 和 isol 都应该接近 0 —— 这两个数一旦长期不为 0 且大幅波动，
+//   就说明解码出来的帧本身在变，得回去看「帧长 X~Y 颗」是不是也在抖。
+int  webGetGlitchFix() { return s_gfix; }
+int  webGetOutDiff()   { return (int)g_outDiff; }
+int  webGetOutIsol()   { return (int)g_outIsol; }
+void webSetGlitchFix(int v) {
+    int on = v ? 1 : 0;
+    if (on == s_gfix) return;
+    s_gfix = on;
+    resetOutHistory();
+    savePrefs();
+    logMsg("[FC  ] 单颗跳变抑制 = %s\n", on ? "开" : "关");
+}
 bool webIsCalibrating() { return s_calibrating; }
 // ---------- v32.29：运行健康诊断（网页日志要看到，不然只能靠猜） ----------
 // 这三项专治「跑一段时间灯全灭、日志也不动」这类现场说不清的问题：
@@ -511,12 +595,14 @@ void webApplyNow() {
     if (s_mode == 0) {
         if (!s_fcActive) { // Betaflight 无飞控：灭灯
             for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+            resetOutHistory();   // v32.37：灭灯也清参考帧，免得下一帧被当成「整条都在跳」
             refreshStrip();
         }
     } else if (s_fcCtl && !s_fcLedOn) {
         // v32.36：飞控要求关灯时，切模式也别点亮（保持灭，等飞控开灯）
         s_fxDimmed = true;
         for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+        resetOutHistory();
         refreshStrip();
     } else {
         s_fxDimmed = false;
@@ -753,6 +839,10 @@ extern "C" void app_main(void) {
                 updateCalibDisplay();
             } else if (s_mode == 0) {
                 stageMark(STAGE_FCMAP);
+                // v32.37：刚从「无信号灭灯 / 灯效模式」接管过来时，s_prevOut 里
+                // 还是旧画面。不清掉的话第一帧会被整片判成「跳变」（邻居也全变），
+                // 白白冻一帧。
+                if (!s_fcActive) resetOutHistory();
                 mapFcToStrip(frame);
                 s_fcActive = true;
                 // v32.36：模式 0 也顺手记一下「飞控开关状态」，这样切到灯效模式的
@@ -793,6 +883,7 @@ extern "C" void app_main(void) {
             (now - s_lastFcMs) > FC_BLANK_MS) {
             s_fcBlanked = true;        // 真断了：灭灯（只做一次，别每秒刷屏）
             for (int i = 0; i < s_stripLen; i++) s_strip[i] = RGB();
+            resetOutHistory();
             refreshStrip();
         }
         if (s_mode == 0 && (now - s_lastFcMs) > 3000) {

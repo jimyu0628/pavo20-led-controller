@@ -535,7 +535,12 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
       <span class="v"><span class="switch ios" id="fcCtlSw" role="switch" aria-checked="true"></span></span>
     </div>
     <div class="kv"><span class="k">飞控 LED 状态</span><span class="v" id="fcLedNow">—</span></div>
+    <div class="kv" id="gfixRow" style="cursor:pointer">
+      <span class="k">抑制单颗跳变</span>
+      <span class="v"><span class="switch ios" id="gfixSw" role="switch" aria-checked="true"></span></span>
+    </div>
     <div class="note">本地 9 个灯效：<b>没接飞控就常亮</b>；接上后亮/灭跟着飞控走（飞控把 LED 关掉这边就灭，颜色仍按本地灯效）。</div>
+    <div class="note">「抑制单颗跳变」：纯色时如果只是<b>孤立一颗</b>灯忽然变色/灭掉（左右邻居都没动），先沿用上一帧，连续 3 帧都这样才认账 —— 用来挡掉信号线上的偶发干扰。真实的整片变化（扫描、彩虹）不受影响；觉得画面拖了可以关掉。</div>
     <div class="kv"><span class="k">网络调参端口</span><span class="v mono" id="mspUrl">tcp://192.168.4.1:5761</span></div>
     <div class="kv"><span class="k">TCP 客户端</span><span class="v mono" id="mspState">—</span></div>
     <div class="note">电脑端 Betaflight 配置器选 <b>Manual Selection</b>，填 <b>tcp://192.168.4.1:5761</b>。</div>
@@ -1281,6 +1286,34 @@ function toggleFcCtl(){
   req.send("fcctl=" + on);
 }
 
+/* v32.37：单颗跳变抑制。纯色时「孤立一颗忽然变色/灭」先沿用上一帧，
+   连续 3 帧都这样才认账 —— 挡掉信号线上的偶发干扰，不碰真实的整片变化。 */
+function renderGfix(){
+  var sw = $("gfixSw");
+  if(sw) sw.classList.toggle("on", (st.gfix|0) !== 0);
+}
+function toggleGfix(){
+  var on = ((st.gfix|0) !== 0) ? 0 : 1;
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 8000;
+  req.onload = function(){
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.gfix === "number"){
+      st.gfix = j.gfix; renderGfix();
+      toast(j.gfix ? "已开启：单颗乱跳会被挡掉" : "已关闭：完全按飞控收到的显示");
+    }else{
+      renderGfix(); toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    renderGfix(); toast("设置失败：确认手机还连着本热点");
+  };
+  req.send("gfix=" + on);
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1315,10 +1348,12 @@ function absorb(j){
   /* v32.32：BLE 广播开关（同样不属于「待应用」的 5 项，直接跟设备同步） */
   if(typeof j.bleen === "number") st.bleen = j.bleen;
   if(typeof j.fcctl === "number") st.fcctl = j.fcctl;
+  if(typeof j.gfix === "number") st.gfix = j.gfix;
   if(typeof j.fcled === "number") st.fcled = j.fcled;
   if(typeof j.fclive === "number") st.fclive = j.fclive;
   renderBleSw();
   renderFcCtl();
+  renderGfix();
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
 }
@@ -1418,6 +1453,11 @@ function renderDev(j){
             // v32.33：「解出」= 本帧收到的位数 ÷ 24，不是飞控配置；
             // 「本板」用的是灯带长度（v32.32 这里错拿了标定状态位，永远显示 0 颗）
             "[RX  ] 解出 " + lend + " 颗 / " + (j.bits|0) + " 位" + needTxt + "\n" +
+            /* v32.37：帧长波动范围 + 帧间隔 —— 判断「图案左右抽动 / 两帧粘连」的两个硬指标 */
+            "[RX  ] 帧长 " + ((j.hvmin|0) > 0 ? ((j.hvmin|0) + "~" + (j.hvmax|0) + " 颗") : "—") +
+                     " · 帧间隔 " + (j.gms|0) + "ms" +
+                     (((j.hvmax|0) - (j.hvmin|0)) > 3 ? "（帧头丢位在抖，图案会左右挪）" : "") +
+                     ((j.gms|0) > 0 && (j.gms|0) < 5 ? "（偏短，可能两帧连在一起）" : "") + "\n" +
             "[RX  ] 帧头缺 " + (j.dropb|0) + " 位 · 断流 " + (j.gap|0) +
                      " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
                      " · 临界位 " + (j.near|0) + "\n" +
@@ -1430,7 +1470,11 @@ function renderDev(j){
                      " · 窗口超时 " + (j.capd|0) + "\n" +
             "[RX  ] 飞控静默 " + (j.sil|0) + "s（距上一帧**解出来**的帧，不是中断次数）" +
                      ((j.sil|0) > 2 ? " —— 真收不到了！" : "") + "\n" +
-            "[RX  ] 线路原始 前4颗 " + (j.head || "-") + "\n" +
+            "[RX  ] 线路原始 帧尾4颗 " + (j.head || "-") + "\n" +
+            // v32.37：纯色静止时 odif（帧间变化颗数）和 oiso（被抑制颗数）都应该接近 0。
+            //   odif 长期非 0 且波动 → 解出来的帧本身在变；oiso 大 → 单颗跳变抑制在干活。
+            "[FC  ] 单颗跳变 抑制 " + (j.oiso|0) + " · 变化 " + (j.odif|0) + " 颗 · 开关 " +
+                     ((j.gfix|0) !== 0 ? "开" : "关（完全照收）") + "\n" +
             // v32.36：本地 9 个灯效现在会看飞控的「开关」——这一行专门说清楚现状，
             // 不然「灯效突然灭了」会让人以为又出 bug。
             "[FC  ] 灯效模式 " + ((j.fcctl|0) !== 1 ? "不接管（一直亮）"
@@ -1605,6 +1649,8 @@ if(bleRow) bleRow.addEventListener("click", toggleBle);
 /* v32.36：连接页 —— 灯效模式听飞控开关（点整行都能切） */
 var fcCtlRow = $("fcCtlRow");
 if(fcCtlRow) fcCtlRow.addEventListener("click", toggleFcCtl);
+var gfixRow = $("gfixRow");
+if(gfixRow) gfixRow.addEventListener("click", toggleGfix);
 
 /* ================= 设备页：日志开关 ================= */
 $("dbgRow").addEventListener("click", function(){

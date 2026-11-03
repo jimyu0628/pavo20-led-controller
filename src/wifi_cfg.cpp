@@ -154,7 +154,13 @@ static void sendState(httpd_req_t* req) {
              "\"bits\":%u,\"mis\":%u,\"spk\":%u,\"mrg\":%u,\"near\":%u,\"per\":%u,"
              "\"gap\":%u,\"gmax\":%u,\"lstg\":%d,\"lup\":%d,"
              // v32.35：残片细分（短=噪声碎片 / 长=跨帧粘连 / drp=线常高）
-             "\"frs\":%u,\"fro\":%u,\"drp\":%u}",
+             "\"frs\":%u,\"fro\":%u,\"drp\":%u,"
+             // v32.37：治「纯色时个别灯随机亮」的三个观测量
+             //   gfix 抑制开关 / odif 本帧变化颗数 / oiso 被抑制颗数
+             //   hvmin~hvmax 最近 100 帧解出颗数的波动范围（差 >3 = 帧头丢位在抖）
+             //   gms 两帧间隔（正常 20~50ms；掉到 1~2ms 说明两帧被当成了一帧）
+             "\"gfix\":%d,\"odif\":%d,\"oiso\":%d,"
+             "\"hvmin\":%u,\"hvmax\":%u,\"gms\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
              webIsCalibrating() ? 1 : 0,
@@ -179,7 +185,9 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxNear, (unsigned)g_rxPeriodNs,
              (unsigned)g_rxGap, (unsigned)g_rxGapMaxNs,
              webGetLastStage(), webGetLastUp(),
-             (unsigned)g_rxShort, (unsigned)g_rxOver, (unsigned)g_rxDrop);
+             (unsigned)g_rxShort, (unsigned)g_rxOver, (unsigned)g_rxDrop,
+             webGetGlitchFix(), webGetOutDiff(), webGetOutIsol(),
+             (unsigned)g_rxHaveMin, (unsigned)g_rxHaveMax, (unsigned)g_rxGapMs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     httpd_resp_sendstr(req, buf);
@@ -223,6 +231,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "ford",   v, sizeof(v)) == ESP_OK) webSetFcOrder(atoi(v));
         if (httpd_query_key_value(q, "bleen",  v, sizeof(v)) == ESP_OK) webSetBleAdv(atoi(v)); // v32.32
         if (httpd_query_key_value(q, "fcctl",  v, sizeof(v)) == ESP_OK) webSetFcCtl(atoi(v));  // v32.36
+        if (httpd_query_key_value(q, "gfix",   v, sizeof(v)) == ESP_OK) webSetGlitchFix(atoi(v)); // v32.37
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

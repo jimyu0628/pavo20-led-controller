@@ -96,10 +96,17 @@ static portMUX_TYPE s_capMux = portMUX_INITIALIZER_UNLOCKED;
 // 前面几颗是新的、后面还是旧的 → 亮部光条里出现杂色；撞狠了通道直接卡死
 // → 灯带定格/全灭，只能重启。所以主循环必须「发完一帧才开采集，收到一帧就关采集」。
 static volatile bool     s_active = false;
-// bit 数组：1 字节存 1 位（1536 位 = 3KB，双缓冲 6KB）。
+// bit 数组：1 字节存 1 位（1536 位 = 1.5KB）。
 // 不用位压缩：毛刺合并要「回退上一位重判」，按位打包回退很别扭。
-static uint8_t           s_bits[2][FC_MAX_BITS];
-static volatile uint16_t s_nbits[2];
+// v32.37【双缓冲 → 三缓冲，这是「纯色时个别灯随机亮/灭」最可能的真凶】
+//   两缓冲时 s_wr 只有另一个可选：主循环正在读 s_bits[s_pub]，ISR 发布下一帧时
+//   s_wr 正好翻回 s_pub —— 只要主循环取帧慢一拍（现场 12Hz 处理 / 飞控 20Hz 发送，
+//   必然慢），ISR 就会在「主循环已关中断拷贝完之后」继续往同一块里写下一帧。
+//   下一轮拷到的就是**半新半旧**：前半截是本帧、后半截是下一帧 —— 亮起来就是
+//   一条灯带上一半颜色对、另一半乱跳，肉眼看着正是「各个灯随机亮」。
+//   三缓冲后 ISR 永远跳过 s_pub 那一块，物理上不可能覆盖正在被读的帧。
+static uint8_t           s_bits[3][FC_MAX_BITS];
+static volatile uint16_t s_nbits[3];
 static volatile uint8_t  s_wr = 0, s_pub = 0;
 static volatile bool     s_frameReady = false;
 
@@ -159,6 +166,11 @@ volatile uint32_t g_rxNear = 0;      // v32.29：判为 1 但离阈值很近的�
 volatile uint32_t g_rxMisalign = 0;  // v32.33：帧内有断流/毛刺/合并的帧（颜色可能错位）
 volatile uint32_t g_rxBits = 0;      // v32.29：最近一帧的原始 bit 数（cnt）
 volatile uint32_t g_rxGap = 0;       // v32.33：最近一帧的断流位数
+volatile uint32_t g_rxHaveMin = 0;   // v32.37：最近 100 帧「解出颗数」的最小值
+volatile uint32_t g_rxHaveMax = 0;   // v32.37：最近 100 帧「解出颗数」的最大值
+                                     //   两者差 >3 就说明帧头丢位在抖 → 图案会左右挪
+volatile uint32_t g_rxGapMs = 0;     // v32.37：最近两帧之间的间隔（ms）
+static uint32_t s_haveN = 0, s_haveMin = 0, s_haveMax = 0;  // v32.37：颗数波动窗口
 volatile uint16_t g_rxGapMaxNs = 0;  // v32.33：最近一帧最长的一位时长
 volatile uint16_t g_rxHiMinNs = 0;
 volatile uint16_t g_rxHiMaxNs = 0;
@@ -198,6 +210,21 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
     g_rxBits = (uint32_t)cnt;
     g_rxLedAtEnd = (uint32_t)(cnt / 24);
     g_rxDropBits = (uint32_t)(cnt % 24);
+    // v32.37：记「最近 100 帧解出颗数的波动范围」。
+    //   为什么非要这个数：帧头丢位的位数每帧都在变（1~3 颗），对齐只能按「帧尾」锚定，
+    //   于是帧头那 1~3 颗每帧都要「保持上一帧」。波动 1 颗时看不出来，波动 5 颗以上
+    //   就是一条会左右抽动的图案 —— 用户报的「各灯随机亮」有一半要从这里看。
+    {
+        uint32_t nl = (uint32_t)(cnt / 24);
+        if (s_haveN == 0) { s_haveMin = nl; s_haveMax = nl; }
+        if (nl < s_haveMin) s_haveMin = nl;
+        if (nl > s_haveMax) s_haveMax = nl;
+        if (++s_haveN >= 100) {
+            g_rxHaveMin = s_haveMin;
+            g_rxHaveMax = s_haveMax;
+            s_haveN = 0;
+        }
+    }
     // v32.33：帧头丢多少位（cnt%24）是**正常现象**，不是错误 —— 中断永远赶不上
     // 帧头那一位，尾部对齐后前面少几颗由 pollFcInput 复制补回。v32.32 之前
     // 把它当「错位帧」，现场 3407 帧报了 3393 帧，纯属吓自己。
@@ -240,10 +267,14 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
     }
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
 
-    // 发布（双缓冲交换）
+    // 发布（三缓冲交换）
     s_nbits[s_wr] = cnt;
     s_pub = s_wr;
-    s_wr = (uint8_t)(s_wr ^ 1);
+    // v32.37：挑下一块时**跳过 s_pub** —— ISR 永远不写主循环正在读的那一块。
+    // 两缓冲版这里只是简单 ^1，绕不开「刚发布的那块」。
+    uint8_t nw = (uint8_t)((s_wr + 1) % 3);
+    if (nw == s_pub) nw = (uint8_t)((nw + 1) % 3);
+    s_wr = nw;
     s_frameReady = true;
     g_rxFrameEnd = (uint32_t)(g_rxFrameEnd + 1);
 }
@@ -525,13 +556,16 @@ bool pollFcInput(FcFrame* out) {
     return false;
 #endif
     if (!s_frameReady) return false;
-    uint8_t p = s_pub;                       // 锁定缓冲：ISR 只会写另一个
+    uint8_t p = s_pub;                       // 锁定缓冲：ISR 永远不会写这一块（三缓冲）
     uint16_t cnt = s_nbits[p];
     s_frameReady = false;
+    if (cnt < 24) return false;
 
     // 帧头丢掉的 bit 数 = cnt % 24，丢掉它们让分组终点正好落在帧尾。
+    // 飞控发 N 颗、我们丢了前 k 位，cnt = 24N-k，所以 cnt%24 = 24-(k%24) 就是
+    // 「飞控第 0 颗没被采全的那一小段」的长度，正好该扔。
     uint16_t start = (uint16_t)(cnt % 24);
-    if (cnt < 24 || start >= cnt) return false;
+    if (start >= cnt) return false;
     const uint8_t* base = s_bits[p];
     const uint8_t* m = s_orderMap[(s_rxOrder < 6) ? s_rxOrder : 0];
     int n = (int)((cnt - start) / 24);
@@ -549,17 +583,29 @@ bool pollFcInput(FcFrame* out) {
         out->leds[i].g = raw[m[1]];
         out->leds[i].b = raw[m[2]];
     }
+    // v32.37：拷贝完再对一次「块号 + 位数」。三缓冲理论上已不会变，
+    // 但这里几乎零成本，是「半新半旧帧」最后一道闸。
+    bool ok = (p == s_pub) && (cnt == s_nbits[p]);
     portEXIT_CRITICAL(&s_capMux);
 
-    // 帧头那一位必然采不到（中断进不来那么快），对齐后正好少一颗灯。
-    // 把它补回来：向前复制一颗，这样灯带末端不会缺一段，飞控灯数也和实际一致。
-    if (start > 0 && n >= 1 && n < FC_MAX_LEDS) {
-        for (int i = n; i > 0; i--) out->leds[i] = out->leds[i - 1];
-        out->leds[0] = out->leds[1];
-        n++;
-    }
+    // v32.37【删掉「帧头补一颗」】
+    //   旧代码在 start>0 时把整帧右移一颗、再把第 0 颗复制成第 1 颗。可
+    //   mapFcToStrip 里已经有 `off = 峰值 - 本帧` 做同样的补偿 —— 两处都补，
+    //   等于补了两次：图案整体反向平移一颗，而且「有补 / 没补」随 cnt%24 在
+    //   两帧之间来回切，灯带就在 0/1 颗之间抽动。这就是「随机亮」的另一半来源。
+    //   现在统一由 off 处理，这里只交出真实解出的颗数。
+    if (!ok) return false;
 
     out->count = n;
+    // v32.37：帧间隔。飞控连续两帧的正常间隔是 20~50ms；如果这个数掉到 1~2ms，
+    // 说明「两帧被当成一帧采」（帧间低电平没超过帧尾判据）—— 那种帧前后半截来自
+    // 不同时刻，亮起来就是一半对一半乱。
+    {
+        static int64_t s_lastUs = 0;
+        int64_t nowUs = esp_timer_get_time();
+        if (s_lastUs > 0 && nowUs > s_lastUs) g_rxGapMs = (uint32_t)((nowUs - s_lastUs) / 1000);
+        s_lastUs = nowUs;
+    }
     if (n > 0) {
         g_rxFrames = (uint32_t)(g_rxFrames + 1);
         g_rxLastLeds = (uint32_t)n;
@@ -567,7 +613,12 @@ bool pollFcInput(FcFrame* out) {
     return n > 0;
 }
 
-// ---------- 诊断：把最近一帧前几颗灯的原始字节打成十六进制 ----------
+// ---------- 诊断：把最近一帧**帧尾**几颗灯的原始字节打成十六进制 ----------
+// v32.37：从「前 4 颗」改成「**后 4 颗**」。
+//   帧头每帧都会被中断延迟吃掉几颗，帧尾才是唯一可靠的锚点 —— 拿前几颗当基准
+//   看对齐方向，本身就是在看一个不确定的东西（现场那条 `000000 ×4` 就是这么来的）。
+//   另外这里也补上临界区：以前直接读 s_bits[s_pub]，ISR 可能正在写同一块，
+//   读出来的「原始字节」其实半新半旧，误导了好几轮排查。
 void fcRxHeadHex(char* buf, int buflen) {
     if (buf == NULL || buflen < 4) return;
     buf[0] = '\0';
@@ -575,17 +626,24 @@ void fcRxHeadHex(char* buf, int buflen) {
         snprintf(buf, (size_t)buflen, "-");
         return;
     }
+    uint8_t raw[4][3];
+    int got = 0;
     uint8_t p = s_pub;
     uint16_t cnt = s_nbits[p];
+    portENTER_CRITICAL(&s_capMux);
     uint16_t start = (uint16_t)(cnt % 24);
-    int n = (int)((cnt - start) / 24);
-    if (n > 4) n = 4;
+    int n = (cnt >= 24 && start < cnt) ? (int)((cnt - start) / 24) : 0;
+    int from = (n > 4) ? n - 4 : 0;
+    for (int i = from; i < n && got < 4; i++, got++) {
+        fcGetLed(s_bits[p], start, i, raw[got]);
+    }
+    portEXIT_CRITICAL(&s_capMux);
+
     int pos = 0;
-    for (int i = 0; i < n && pos < buflen - 10; i++) {
-        uint8_t raw[3];
-        fcGetLed(s_bits[p], start, i, raw);
+    for (int i = 0; i < got && pos < buflen - 10; i++) {
         pos += snprintf(buf + pos, (size_t)(buflen - pos), "%02X%02X%02X ",
-                        raw[0], raw[1], raw[2]);
+                        raw[i][0], raw[i][1], raw[i][2]);
     }
     if (pos > 0 && buf[pos - 1] == ' ') buf[pos - 1] = '\0';
+    if (pos == 0) snprintf(buf, (size_t)buflen, "-");
 }
