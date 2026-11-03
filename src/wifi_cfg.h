@@ -79,6 +79,22 @@ int  webGetOutMax();
 int  webGetRxBitDiff();
 int  webGetTest();
 void webSetTest(int on);
+// v32.39：瞬时值会被「刚好正常」的一次采样骗过去（v32.38 现场看到 0、灯却在跳），
+//   所以补两个 5 秒窗口统计：
+//     RxBitDiffMax = 窗口内最大位差（0 = 这 5 秒一帧都没判反）
+//     RxBitDiffN   = 窗口内位差 ≠ 0 的帧数
+//   另外给「输出侧」一个自证：TxSum=交给 DMA 的字节流校验和，TxSumChg=与上一帧
+//   不同的次数（画面静止时必须恒 0）。两者都 0 而灯还在变 → 只可能是灯珠侧硬件。
+int  webGetRxBitDiffMax();
+int  webGetRxBitDiffN();
+unsigned webGetTxSum();
+int  webGetTxSumChg();
+int  webGetTxRepeat();   // 每帧连发几遍（v32.39 默认 2）
+int  webGetTxResetUs();  // 帧内复位低电平（µs，v32.39 ≈ 333）
+// v32.39：灰阶自检 —— 发一条已知的亮度阶梯，专门验「输出通路」。
+//   冻结自检看不出「锁存不全」（静止画面下上一帧和本帧一样，错也错成一样）。
+int  webGetRamp();
+void webSetRamp(int on);
 // v32.33：上次重启前执行到哪一步（崩溃落点）· 崩之前跑了多少秒
 //   靠 RTC 内存跨重启保存，专治「死机了但看不到任何现场」——
 //   配「复位原因」一起看：PANIC/看门狗 + 落点，就能缩到具体哪个函数。

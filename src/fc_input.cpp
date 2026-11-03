@@ -175,6 +175,8 @@ volatile uint32_t g_rxHaveMax = 0;   // v32.37：最近 100 帧「解出颗数�
                                      //   两者差 >3 就说明帧头丢位在抖 → 图案会左右挪
 volatile uint32_t g_rxGapMs = 0;     // v32.37：最近两帧之间的间隔（ms）
 volatile uint32_t g_rxBitDiff = 0;   // v32.38：与上一帧（帧尾对齐）不同的位数
+volatile uint32_t g_rxBitDiffMax = 0;// v32.39：峰值（自上次清零）
+volatile uint32_t g_rxBitDiffN = 0;  // v32.39：位差 ≠ 0 的帧数（自上次清零）
 static uint32_t s_haveN = 0, s_haveMin = 0, s_haveMax = 0;  // v32.37：颗数波动窗口
 volatile uint16_t g_rxGapMaxNs = 0;  // v32.33：最近一帧最长的一位时长
 volatile uint16_t g_rxHiMinNs = 0;
@@ -189,6 +191,11 @@ static bool s_rxSwInit = false;
 
 bool fcRxOk() { return s_rxSwInit; }
 int  fcRxErr() { return (int)s_rxErr; }
+// v32.39：峰值窗口复位（日志每 5 秒读走一次就清，下一窗口重新统计）
+void fcRxBitDiffPeakClear() {
+    g_rxBitDiffMax = 0;
+    g_rxBitDiffN = 0;
+}
 
 void fcRxSetActive(bool on) { s_active = on; }
 bool fcRxActive() { return s_active; }
@@ -292,6 +299,8 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
                 if (curB[cnt - 1 - j] != prevB[s_prevCnt - 1 - j]) d++;
             }
             g_rxBitDiff = d;
+            if (d > g_rxBitDiffMax) g_rxBitDiffMax = d;
+            if (d > 0) g_rxBitDiffN = (uint32_t)(g_rxBitDiffN + 1);
         }
         memcpy(s_prevBits, s_bits[s_wr], cnt);
         s_prevCnt = cnt;

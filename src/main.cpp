@@ -189,6 +189,9 @@ volatile uint32_t g_outDiff = 0;  // v32.38：本帧「大幅变化」(≥72) �
 volatile uint32_t g_outMicro = 0; // v32.38：本帧「微差」(1~71) 的颗数
 volatile uint32_t g_outMax = 0;   // v32.38：本帧最大通道差（0~255）
 volatile uint32_t g_outIsol = 0;  // 本帧被「孤立跳变」抑制掉的颗数
+// v32.39：位差统计的 5 秒窗口（日志每 5 秒读走并清零一次窗口）
+static volatile uint32_t s_bdifMax = 0;
+static volatile uint32_t s_bdifN   = 0;
 static inline int colDist(const RGB& a, const RGB& b) {
     int d = (int)a.r - (int)b.r; if (d < 0) d = -d;
     int e = (int)a.g - (int)b.g; if (e < 0) e = -e; if (e > d) d = e;
@@ -206,6 +209,17 @@ static inline int colDist(const RGB& a, const RGB& b) {
 static bool     s_testOn = false;
 static uint32_t s_testMs = 0;
 static RGB      s_testBuf[STRIP_MAX_LEDS];   // 冻结下来的那一帧
+// v32.39【灰阶自检 —— 补上「冻结自检」证明不了的那一半】
+//   冻结自检只把「一帧固定的颜色」原样重发。问题在于：只要画面是静止的，
+//   「灯珠没锁干净 / 上一帧残留」这类错误就完全看不见 —— 上一帧和本帧内容一样，
+//   错也错成一样。所以它不闪 ≠ 输出链路干净。
+//   灰阶自检发的是**已知的亮度阶梯**（第 i 颗红 = i×255/(n-1)）。判读方法很硬：
+//     · 阶梯平滑、位置稳定 → ESP32 → 灯带这段通路（电平/线材/锁存）是好的，
+//       毛病只能在前级（解码/映射）；
+//     · 有台阶跳变、某几颗明显偏暗或位置在晃 → 输出侧硬件问题，改固件无用。
+//   因为阶梯里每颗灯的数值都不同，任何一 bit 判错都会在阶梯上留下一个台阶。
+static bool     s_rampOn = false;
+static RGB      s_rampBuf[STRIP_MAX_LEDS];
 // 清屏 / 模式切换时把「上一帧」也清掉，免得抑制逻辑拿旧颜色当参考
 static void resetOutHistory() {
     for (int i = 0; i < STRIP_MAX_LEDS; i++) {
@@ -539,15 +553,45 @@ int  webGetOutIsol()   { return (int)g_outIsol; }
 int  webGetOutMicro()  { return (int)g_outMicro; }
 int  webGetOutMax()    { return (int)g_outMax; }
 int  webGetRxBitDiff() { return (int)g_rxBitDiff; }
+// v32.39：5 秒窗口内的位差峰值与差异帧数（不是瞬时值 —— 瞬时值会被一次
+// 「刚好正常」的采样骗过去，v32.38 的 0 就是这么来的）
+int  webGetRxBitDiffMax() { return (int)s_bdifMax; }
+int  webGetRxBitDiffN()   { return (int)s_bdifN; }
+// v32.39：输出侧自证 —— 交给 DMA 的字节流校验和 / 与上一帧不同的次数
+unsigned webGetTxSum()    { return (unsigned)g_txSum; }
+int  webGetTxSumChg()     { return (int)g_txSumChg; }
+int  webGetTxRepeat()     { return ledTxRepeat(); }
+int  webGetTxResetUs()    { return ledTxResetUs(); }
 int  webGetTest()      { return s_testOn ? 1 : 0; }
+int  webGetRamp()      { return s_rampOn ? 1 : 0; }
+// v32.39：两个自检互斥 —— 同时开着会互相覆盖，谁也看不出结果
+void webSetRamp(int on) {
+    if (on && !s_rampOn) {
+        int n = (s_stripLen > 1) ? s_stripLen : 1;
+        for (int i = 0; i < STRIP_MAX_LEDS; i++) {
+            int lv = (i < n) ? (i * 255 / (n - 1)) : 0;
+            s_rampBuf[i] = RGB((uint8_t)lv, 0, 0);   // 只点红通道，电流可控
+        }
+        if (s_testOn) { s_testOn = false; }
+        s_testMs = 0;
+        s_rampOn = true;
+        logMsg("[自检] 灰阶阶梯（第 i 颗 红=i×255/%d）。照原样看：阶梯应该平滑、位置不动；"
+               "有台阶/某几颗偏暗/位置在晃 = 输出侧硬件（电平/线材/锁存）。\n", n - 1);
+    } else if (!on && s_rampOn) {
+        s_rampOn = false;
+        s_lastFxMs = nowMs() - fxIntervalMs();
+        logMsg("[自检] 灰阶阶梯已退出。\n");
+    }
+}
 void webSetTest(int on) {
     if (on && !s_testOn) {
         // 冻结「现在屏幕上这一帧」：颜色、亮度、颗数都照原样，只固定重发
         for (int i = 0; i < STRIP_MAX_LEDS; i++) s_testBuf[i] = (i < s_stripLen) ? s_strip[i] : RGB();
+        if (s_rampOn) s_rampOn = false;
         s_testMs = 0;
         s_testOn = true;
         logMsg("[自检] 冻结画面，原样重发（不碰飞控、不碰灯效）。"
-               "此时若灯还在随机变暗 = 输出侧问题（电平/反射/供电），与解码无关。\n");
+               "注意：静止画面下「锁存不全」这类错误是看不出来的 —— 要验输出通路请用灰阶自检。\n");
     } else if (!on && s_testOn) {
         s_testOn = false;
         s_lastFxMs = nowMs() - fxIntervalMs();   // 退出后立刻重画，别停一帧
@@ -801,6 +845,11 @@ extern "C" void app_main(void) {
             // v32.24：飞控解码质量单独一行（每 5 秒），便于判断「跳色」是不是解码错帧
             if (now - lastRxLogMs >= 5000) {
                 lastRxLogMs = now;
+                // v32.39：先把这个窗口的位差峰值取走再清零 —— 峰值才是证据，
+                // 瞬时值只能证明「这一刻刚好没判反」。
+                s_bdifMax = g_rxBitDiffMax;
+                s_bdifN   = g_rxBitDiffN;
+                fcRxBitDiffPeakClear();
                 char head[48];
                 fcRxHeadHex(head, sizeof(head));
                 logMsg("[RX] ok=%d err=0x%x frames=%u bits=%u mis=%u spike=%u merge=%u near=%u | hi=%u..%u lo=%u per=%u thr=%u ns | frag=%u ghost=%u cap=%uus ord=%s head=%s\n",
@@ -827,10 +876,10 @@ extern "C" void app_main(void) {
         // 2) 飞控信号轮询
         //    v32.38：自检优先。冻结画面期间完全绕开飞控采集与灯效渲染，
         //    只按固定节奏把同一串字节重发 —— 这是「解码 vs 输出」的判决开关。
-        if (s_testOn) {
+        if (s_testOn || s_rampOn) {
             if ((uint32_t)(now - s_testMs) >= 80) {   // ≈12 帧/秒，与正常显示同节奏
                 s_testMs = now;
-                showStrip(s_testBuf, s_stripLen);
+                showStrip(s_testOn ? s_testBuf : s_rampBuf, s_stripLen);
             }
             if (fcRxActive()) { fcRxSetActive(false); s_capWinMs = 0; }
             s_sniffUntilMs = 0;

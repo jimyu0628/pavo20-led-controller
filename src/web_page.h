@@ -543,10 +543,16 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
       <span class="k">冻结画面自检</span>
       <span class="v"><span class="switch ios" id="tstSw" role="switch" aria-checked="false"></span></span>
     </div>
+    <div class="kv" id="rampRow" style="cursor:pointer">
+      <span class="k">灰阶阶梯自检</span>
+      <span class="v"><span class="switch ios" id="rampSw" role="switch" aria-checked="false"></span></span>
+    </div>
     <div class="note">本地 9 个灯效：<b>没接飞控就常亮</b>；接上后亮/灭跟着飞控走（飞控把 LED 关掉这边就灭，颜色仍按本地灯效）。</div>
     <div class="note">「抑制单颗跳变」：纯色时如果只是<b>孤立一颗</b>灯忽然变色/灭掉（左右邻居都没动），先沿用上一帧，连续 3 帧都这样才认账 —— 用来挡掉信号线上的偶发干扰。真实的整片变化（扫描、彩虹）不受影响；觉得画面拖了可以关掉。</div>
     <div class="note"><b>「冻结画面自检」是排故用的</b>：打开后把当前这一帧冻住、原样重发，期间完全不碰飞控也不跑灯效。
       如果这时灯带<b>还会随机变暗</b>，说明毛病在输出侧（电平/反射/供电），改固件没用；<b>纹丝不动</b>就是解码侧。看完记得关掉。</div>
+    <div class="note"><b>「灰阶阶梯自检」补的正是上面那个开关看不到的一半</b>：画面静止时「灯珠没锁干净 / 上一帧残留」根本看不出来（上一帧和本帧一样，错也错成一样）。
+      这一项发的是<b>已知亮度阶梯</b>（第 1 颗最暗、最后 1 颗最亮）。<b>阶梯平滑、位置不动</b> = ESP32→灯带这段通路没问题；<b>有台阶跳变 / 某几颗明显偏暗 / 位置在晃</b> = 输出侧硬件（3.3V 电平不够、线太长、地没共好、锁存复位不足）。</div>
     <div class="kv"><span class="k">网络调参端口</span><span class="v mono" id="mspUrl">tcp://192.168.4.1:5761</span></div>
     <div class="kv"><span class="k">TCP 客户端</span><span class="v mono" id="mspState">—</span></div>
     <div class="note">电脑端 Betaflight 配置器选 <b>Manual Selection</b>，填 <b>tcp://192.168.4.1:5761</b>。</div>
@@ -1349,6 +1355,35 @@ function toggleTst(){
   req.send("tst=" + on);
 }
 
+/* v32.39：灰阶阶梯自检 —— 发一条已知亮度阶梯，专验「输出通路」。
+   冻结自检只能证明「没有时序抖动」，证明不了「灯珠都锁对了」：
+   画面静止时上一帧和本帧内容相同，锁存不全也看不出来。 */
+function renderRamp(){
+  var sw = $("rampSw");
+  if(sw) sw.classList.toggle("on", (st.ramp|0) === 1);
+}
+function toggleRamp(){
+  var on = ((st.ramp|0) === 1) ? 0 : 1;
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 8000;
+  req.onload = function(){
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.ramp === "number"){
+      st.ramp = j.ramp; st.tst = j.tst; renderRamp(); renderTst();
+      toast(j.ramp ? "已发送亮度阶梯：看阶梯平滑不平滑、位置稳不稳" : "已退出阶梯自检");
+    }else{
+      renderRamp(); toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    renderRamp(); toast("设置失败：确认手机还连着本热点");
+  };
+  req.send("ramp=" + on);
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1387,10 +1422,12 @@ function absorb(j){
   if(typeof j.fcled === "number") st.fcled = j.fcled;
   if(typeof j.fclive === "number") st.fclive = j.fclive;
   if(typeof j.tst === "number") st.tst = j.tst;      // v32.38：冻结自检状态
+  if(typeof j.ramp === "number") st.ramp = j.ramp;   // v32.39：灰阶阶梯自检状态
   renderBleSw();
   renderFcCtl();
   renderGfix();
   renderTst();
+  renderRamp();
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
 }
@@ -1485,6 +1522,14 @@ function renderDev(j){
             "[MSP ] " + (j.msp||"?") + "\n" +
             "[LED ] 发送 " + (j.tx|0) + "/s · 失败 " + (j.txf|0) +
                      " · 循环卡顿 " + (j.lpm|0) + "ms\n" +
+            /* v32.39：输出侧自证。txsum 是「真正交给 DMA 的那段字节」的校验和，
+               txchg 是「与上一帧不同」的次数 —— 画面静止时必须恒为 0。
+               txchg 恒 0 而灯还在变，就等于证明线上发的字节没变过，问题只能在灯珠侧。 */
+            "[LED ] 输出校验 " + (((j.txsum|0)>>>0).toString(16).toUpperCase()) +
+                     " · 5s 内变 " + (j.txchg|0) + " 次" +
+                     (((j.txchg|0) === 0) ? "（字节流一帧没变过 ✓）" : "（字节流在变，属解码/映射侧）") +
+                     " · 连发 " + (j.rep|0) + "× · 复位 " + (j.rus|0) + "µs" +
+                     (((j.ramp|0) === 1) ? " · 灰阶自检中" : ((j.tst|0) === 1 ? " · 冻结自检中" : "")) + "\n" +
             "[RX  ] LED 帧 " + (j.fc|0) + " · 字节顺序 " + (j.fordn||"?") +
                      " · 位周期 " + (j.per|0) + "ns\n" +
             // v32.33：「解出」= 本帧收到的位数 ÷ 24，不是飞控配置；
@@ -1499,9 +1544,10 @@ function renderDev(j){
                纯色静止时必须是 0；不是 0 就是我们把某些位判反了，
                一位判反=某颗灯某通道某 bit 翻转，落在高位正是「这颗暗一半」。 */
             "[RX  ] 帧内位差 " + (j.bdif|0) + " 位" +
-                     ((j.bdif|0) === 0 ? "（与上一帧完全一致 ✓）"
-                      : ((j.bdif|0) <= 4 ? "（轻微判反，偶发）"
-                      : "（判反较多 —— 解码不稳，这就是灯忽明忽暗的来源）")) + "\n" +
+                     "（5s 峰值 " + (j.bdmax|0) + " · 差异帧 " + (j.bdn|0) + "）" +
+                     (((j.bdmax|0) === 0) ? " ✓ 一帧都没判反"
+                      : (((j.bdmax|0) <= 8 && (j.bdn|0) <= 5) ? "（偶发判反，灯会个别闪）"
+                      : "（判反多 —— 解码不稳，这就是灯忽明忽暗的来源）")) + "\n" +
             "[RX  ] 帧头缺 " + (j.dropb|0) + " 位 · 断流 " + (j.gap|0) +
                      " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
                      " · 临界位 " + (j.near|0) + "\n" +
@@ -1701,6 +1747,8 @@ var gfixRow = $("gfixRow");
 if(gfixRow) gfixRow.addEventListener("click", toggleGfix);
 var tstRow = $("tstRow");
 if(tstRow) tstRow.addEventListener("click", toggleTst);
+var rampRow = $("rampRow");
+if(rampRow) rampRow.addEventListener("click", toggleRamp);
 
 /* ================= 设备页：日志开关 ================= */
 $("dbgRow").addEventListener("click", function(){

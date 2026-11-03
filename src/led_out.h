@@ -28,6 +28,12 @@ extern volatile uint32_t g_txCount;
 // 是「亮部杂色」「灯带全灭」的直接证据（现在失败会自动复位通道自愈）。
 extern volatile uint32_t g_txFail;
 extern volatile int      g_txLastErr;
+// v32.39：编码结果的校验和（FNV-1a）与「和上一帧不同」的次数。
+//   画面静止时 txchg 必须恒为 0 —— 那说明交给 DMA 的字节流一帧都没变过。
+extern volatile uint32_t g_txSum;
+extern volatile uint32_t g_txSumChg;
+int ledTxRepeat();    // 每帧连发几遍（v32.39 = 2）
+int ledTxResetUs();   // 帧内复位低电平长度（µs，v32.39 ≈ 333）
 
 // 初始化结果诊断（USB 串口就绪后由 main 打印，避免开机早期日志丢失）
 bool ledOutOk();    // TX 通道与编码器是否都创建成功

@@ -94,6 +94,19 @@ extern volatile uint32_t g_rxGapMs;
 //   的一个 bit 翻转，落在高位正好是「这颗灯暗一半」，就是现场「随机 1/3 灯稍暗」。
 //   若它恒为 0 而灯还在闪，问题在输出侧（ESP32→灯带的电气 / SPI·DMA），与解码无关。
 extern volatile uint32_t g_rxBitDiff;
+// v32.39【为什么非要峰值不可】
+//   v32.38 的 g_rxBitDiff 是「最近一帧 vs 上一帧」的**瞬时值**。现场贴回来的日志
+//   显示 0，可用户同时说灯在跳 —— 两者并不矛盾：只要偶发一两帧判反，只要日志
+//   抓的不是那一帧，看到的就永远是 0。瞬时值证明不了「一直为 0」。
+//   所以加两个只增不清（由日志每 5 秒读走并清零）的量：
+//     g_rxBitDiffMax —— 这 5 秒里最大的位差
+//     g_rxBitDiffN   —— 这 5 秒里位差 ≠ 0 的帧数
+//   判读：两个都恒为 0 = 解码一帧都没判反 → 问题 100% 在输出侧；
+//         峰值 1~8 且差异帧 sporadic = 位判反，盯「临界位 / 高位区间 / 阈值」。
+extern volatile uint32_t g_rxBitDiffMax;
+extern volatile uint32_t g_rxBitDiffN;
+// 由日志读取后清零（峰值统计窗口复位）
+void fcRxBitDiffPeakClear();
 extern volatile uint16_t g_rxGapMaxNs; // v32.33：最近一帧最长的一位时长（正常 = 位周期）
 extern volatile uint16_t g_rxPeriodNs; // v32.29：实测位周期（ns）
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）

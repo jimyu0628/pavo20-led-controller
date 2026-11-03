@@ -163,6 +163,10 @@ static void sendState(httpd_req_t* req) {
              // v32.38：变化分档 + 帧内位差 + 冻结自检
              //   omic=微差颗数 / omax=本帧最大通道差 / bdif=与上一帧不同的位数 / tst=冻结自检
              "\"omic\":%d,\"omax\":%d,\"bdif\":%d,\"tst\":%d,"
+             // v32.39：bdmax/bdn = 5 秒窗口内的位差峰值 / 差异帧数（瞬时 bdif 会骗人）；
+             //   txsum = 交给 DMA 的字节流校验和，txchg = 与上一帧不同的次数（静止时必须 0）；
+             //   ramp = 灰阶自检，rep/rus = 每帧连发遍数 / 帧内复位时长
+             "\"bdmax\":%d,\"bdn\":%d,\"txsum\":%u,\"txchg\":%u,\"ramp\":%d,\"rep\":%d,\"rus\":%d,"
              "\"hvmin\":%u,\"hvmax\":%u,\"gms\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
@@ -191,6 +195,9 @@ static void sendState(httpd_req_t* req) {
              (unsigned)g_rxShort, (unsigned)g_rxOver, (unsigned)g_rxDrop,
              webGetGlitchFix(), webGetOutDiff(), webGetOutIsol(),
              webGetOutMicro(), webGetOutMax(), webGetRxBitDiff(), webGetTest(),
+             webGetRxBitDiffMax(), webGetRxBitDiffN(),
+             webGetTxSum(), webGetTxSumChg(), webGetRamp(),
+             webGetTxRepeat(), webGetTxResetUs(),
              (unsigned)g_rxHaveMin, (unsigned)g_rxHaveMax, (unsigned)g_rxGapMs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -237,6 +244,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "fcctl",  v, sizeof(v)) == ESP_OK) webSetFcCtl(atoi(v));  // v32.36
         if (httpd_query_key_value(q, "gfix",   v, sizeof(v)) == ESP_OK) webSetGlitchFix(atoi(v)); // v32.37
         if (httpd_query_key_value(q, "tst",    v, sizeof(v)) == ESP_OK) webSetTest(atoi(v));       // v32.38
+        if (httpd_query_key_value(q, "ramp",   v, sizeof(v)) == ESP_OK) webSetRamp(atoi(v));       // v32.39
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "esp_err.h"
 #include "esp_attr.h"     // v32.38：WORD_ALIGNED_ATTR（DMA 源地址要按字对齐）
+#include "esp_rom_sys.h"  // v32.39：esp_rom_delay_us（两遍发送之间的复位间隔）
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/spi_master.h"
@@ -33,8 +34,23 @@
 // ============================================================
 
 #define SPI_LED_BYTES    (STRIP_MAX_LEDS * 9)  // 每颗灯 3 字节 × 8 bit × 3 SPI bit
-#define SPI_RESET_BYTES  40                    // 复位：40 × 3.3µs ≈ 132µs（要 > 80µs）
+// v32.39【复位从 40 字节(133µs) 提到 100 字节(333µs)】
+//   旧值按「WS2812B 老手册 >50µs / 常见阈值 80µs」取的，133µs 已经够。但现场这批
+//   灯珠（以及多数新批次，包括 WS2812B-V5 / 各类克隆）手册要求的是 **>280µs**。
+//   复位不够的后果不是「全乱」，而是「一部分灯珠锁存了、另一部分还挂上一帧的数据」
+//   —— 表现正好是「随机几颗灯颜色/亮度跟别的灯不一样」。而只要画面是静止的，
+//   上一帧和本帧内容相同，这个错就完全看不出来（「冻结自检不闪」正是这个道理：
+//   它证明不了输出干净，只能证明没有时序抖动）。
+//   333µs 对所有已知 WS2812 变种都安全，多花的时间只有 0.13ms/帧。
+#define SPI_RESET_BYTES  100                   // 复位：100 × 3.3µs ≈ 333µs（> 280µs）
 #define SPI_ALL_BYTES    (SPI_LED_BYTES + SPI_RESET_BYTES + 8)
+// v32.39【同一帧连发两遍】
+//   第二遍紧跟在 400µs 之后重发同样的字节。作用是给「锁存没锁干净 / 第一遍被线上
+//   干扰啃掉几个 bit」的灯珠一次补偿机会 —— 对正常灯带毫无副作用（同样颜色再锁
+//   一次还是同样颜色），成本 1.7ms/帧。若现场「随机几颗偏暗」就此消失，那问题
+//   就已经定位在灯珠锁存/信号完整性这一侧，与解码无关。
+#define LED_TX_REPEAT    2
+#define LED_TX_GAP_US    400                   // 两遍之间 >280µs 复位
 
 static spi_device_handle_t s_spi = NULL;
 // v32.32：主循环与 HTTP 任务都会调 showStrip（网页改参数要立即上屏），
@@ -52,6 +68,26 @@ static esp_err_t s_ledErr = ESP_OK; // 初始化失败错误码（延迟到 USB 
 volatile uint32_t g_txCount = 0;   // 成功发送帧计数（心跳诊断）
 volatile uint32_t g_txFail = 0;    // 发送失败次数
 volatile int      g_txLastErr = 0; // 最近一次失败的错误码
+// v32.39【输出侧自证：编码结果校验和】
+//   「解出来的帧一模一样」这件事，前面已经有 g_rxBitDiff / g_outDiff 两层证明；
+//   但那是「颜色数组」层面的。真正上线的是编码后的 SPI 字节流，中间还有编码、
+//   补字节、DMA 对齐三处可能出错。这里对**实际交给 DMA 的那段字节**算一次
+//   FNV-1a，并统计「与上一帧校验和不同」的次数。
+//   判读：画面静止时 txchg 必须恒为 0。若 txchg 恒 0 而灯还在变 —— 我们可以
+//   保证线上发的是同一串字节，那问题只可能在灯珠侧（供电/电平/锁存），
+//   固件这边再改也是白改。
+volatile uint32_t g_txSum = 0;
+volatile uint32_t g_txSumChg = 0;
+static uint32_t   s_prevSum = 0;
+static bool       s_prevSumOk = false;
+
+static inline uint32_t fnv1a(const uint8_t* p, int n) {
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < n; i++) { h ^= p[i]; h *= 16777619u; }
+    return h;
+}
+int ledTxRepeat() { return LED_TX_REPEAT; }
+int ledTxResetUs() { return SPI_RESET_BYTES * 1000 / 300; }  // 近似：3.33µs/字节
 
 bool ledOutOk() { return s_spi != NULL; }
 int  ledOutErr() { return (int)s_ledErr; }
@@ -138,7 +174,18 @@ void showStrip(const RGB* leds, int n) {
     spi_transaction_t t = {};
     t.length = (size_t)len * 8;         // 单位是 bit
     t.tx_buffer = s_spiBuf;
-    esp_err_t e = spi_device_polling_transmit(s_spi, &t);
+    // v32.39：校验和算的是「真正交给 DMA 的那段字节」，编码/补齐之后的最终结果
+    uint32_t sum = fnv1a(s_spiBuf, len);
+    g_txSum = sum;
+    if (s_prevSumOk && sum != s_prevSum) g_txSumChg++;
+    s_prevSum = sum;
+    s_prevSumOk = true;
+    esp_err_t e = ESP_OK;
+    for (int r = 0; r < LED_TX_REPEAT; r++) {
+        if (r) esp_rom_delay_us(LED_TX_GAP_US);   // 两遍之间留足复位，别硬贴在一起
+        e = spi_device_polling_transmit(s_spi, &t);
+        if (e != ESP_OK) break;
+    }
     if (e != ESP_OK) {
         g_txFail++;
         g_txLastErr = (int)e;
