@@ -539,8 +539,14 @@ static const char HTML_PAGE[] = R"rawliteral(<!DOCTYPE html>
       <span class="k">抑制单颗跳变</span>
       <span class="v"><span class="switch ios" id="gfixSw" role="switch" aria-checked="true"></span></span>
     </div>
+    <div class="kv" id="tstRow" style="cursor:pointer">
+      <span class="k">冻结画面自检</span>
+      <span class="v"><span class="switch ios" id="tstSw" role="switch" aria-checked="false"></span></span>
+    </div>
     <div class="note">本地 9 个灯效：<b>没接飞控就常亮</b>；接上后亮/灭跟着飞控走（飞控把 LED 关掉这边就灭，颜色仍按本地灯效）。</div>
     <div class="note">「抑制单颗跳变」：纯色时如果只是<b>孤立一颗</b>灯忽然变色/灭掉（左右邻居都没动），先沿用上一帧，连续 3 帧都这样才认账 —— 用来挡掉信号线上的偶发干扰。真实的整片变化（扫描、彩虹）不受影响；觉得画面拖了可以关掉。</div>
+    <div class="note"><b>「冻结画面自检」是排故用的</b>：打开后把当前这一帧冻住、原样重发，期间完全不碰飞控也不跑灯效。
+      如果这时灯带<b>还会随机变暗</b>，说明毛病在输出侧（电平/反射/供电），改固件没用；<b>纹丝不动</b>就是解码侧。看完记得关掉。</div>
     <div class="kv"><span class="k">网络调参端口</span><span class="v mono" id="mspUrl">tcp://192.168.4.1:5761</span></div>
     <div class="kv"><span class="k">TCP 客户端</span><span class="v mono" id="mspState">—</span></div>
     <div class="note">电脑端 Betaflight 配置器选 <b>Manual Selection</b>，填 <b>tcp://192.168.4.1:5761</b>。</div>
@@ -1314,6 +1320,35 @@ function toggleGfix(){
   req.send("gfix=" + on);
 }
 
+/* v32.38：冻结画面自检 —— 排「解码 vs 输出」用的开关。
+   打开后固件把当前这一帧冻住原样重发，完全不碰飞控；怕用户忘了关，
+   页面上给它一个显眼的提示条，并且 3 分钟后自动提醒一次。 */
+function renderTst(){
+  var sw = $("tstSw");
+  if(sw) sw.classList.toggle("on", (st.tst|0) === 1);
+}
+function toggleTst(){
+  var on = ((st.tst|0) === 1) ? 0 : 1;
+  var req = new XMLHttpRequest();
+  req.open("POST", "/api/set", true);
+  req.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+  req.timeout = 8000;
+  req.onload = function(){
+    var j = null;
+    try{ j = JSON.parse(req.responseText); }catch(e){}
+    if(j && typeof j.tst === "number"){
+      st.tst = j.tst; renderTst();
+      toast(j.tst ? "已冻结：画面固定重发，现在看灯还闪不闪" : "已恢复：飞控/灯效重新接管");
+    }else{
+      renderTst(); toast("设备没回话，稍后再试");
+    }
+  };
+  req.onerror = req.ontimeout = function(){
+    renderTst(); toast("设置失败：确认手机还连着本热点");
+  };
+  req.send("tst=" + on);
+}
+
 /* ================= 从设备状态同步 ================= */
 var upBase = 0, upAt = 0;
 var RST = {1:"上电复位",2:"外部复位",3:"软件重启",4:"内核崩溃",5:"中断看门狗",
@@ -1351,9 +1386,11 @@ function absorb(j){
   if(typeof j.gfix === "number") st.gfix = j.gfix;
   if(typeof j.fcled === "number") st.fcled = j.fcled;
   if(typeof j.fclive === "number") st.fclive = j.fclive;
+  if(typeof j.tst === "number") st.tst = j.tst;      // v32.38：冻结自检状态
   renderBleSw();
   renderFcCtl();
   renderGfix();
+  renderTst();
   if(typeof j.up === "number"){ upBase = j.up; upAt = Date.now(); }
   renderDev(j);
 }
@@ -1458,6 +1495,13 @@ function renderDev(j){
                      " · 帧间隔 " + (j.gms|0) + "ms" +
                      (((j.hvmax|0) - (j.hvmin|0)) > 3 ? "（帧头丢位在抖，图案会左右挪）" : "") +
                      ((j.gms|0) > 0 && (j.gms|0) < 5 ? "（偏短，可能两帧连在一起）" : "") + "\n" +
+            /* v32.38：帧内位差 —— 与上一帧（帧尾对齐）不同的位数。
+               纯色静止时必须是 0；不是 0 就是我们把某些位判反了，
+               一位判反=某颗灯某通道某 bit 翻转，落在高位正是「这颗暗一半」。 */
+            "[RX  ] 帧内位差 " + (j.bdif|0) + " 位" +
+                     ((j.bdif|0) === 0 ? "（与上一帧完全一致 ✓）"
+                      : ((j.bdif|0) <= 4 ? "（轻微判反，偶发）"
+                      : "（判反较多 —— 解码不稳，这就是灯忽明忽暗的来源）")) + "\n" +
             "[RX  ] 帧头缺 " + (j.dropb|0) + " 位 · 断流 " + (j.gap|0) +
                      " · 毛刺 " + (j.spk|0) + " · 合并 " + (j.mrg|0) +
                      " · 临界位 " + (j.near|0) + "\n" +
@@ -1473,8 +1517,12 @@ function renderDev(j){
             "[RX  ] 线路原始 帧尾4颗 " + (j.head || "-") + "\n" +
             // v32.37：纯色静止时 odif（帧间变化颗数）和 oiso（被抑制颗数）都应该接近 0。
             //   odif 长期非 0 且波动 → 解出来的帧本身在变；oiso 大 → 单颗跳变抑制在干活。
-            "[FC  ] 单颗跳变 抑制 " + (j.oiso|0) + " · 变化 " + (j.odif|0) + " 颗 · 开关 " +
-                     ((j.gfix|0) !== 0 ? "开" : "关（完全照收）") + "\n" +
+            // v32.38：把「变化」拆成「大幅（≥72，肉眼可见）/ 微差（1~71，抖动）」，再给最大差值。
+            //   原来只有一个「变化 44 颗」，判据是「差 ≠ 0」，1 LSB 也算 —— 纯色静止时
+            //   永远显示 44~45 颗，看着像整条在乱跳，实际可能只是抖动，白吓了好几轮。
+            "[FC  ] 变化 大幅 " + (j.odif|0) + " 颗（应为 0）· 微差 " + (j.omic|0) +
+                     " 颗 · 最大差 " + (j.omax|0) + " · 抑制 " + (j.oiso|0) +
+                     " · 开关 " + ((j.gfix|0) !== 0 ? "开" : "关（完全照收）") + "\n" +
             // v32.36：本地 9 个灯效现在会看飞控的「开关」——这一行专门说清楚现状，
             // 不然「灯效突然灭了」会让人以为又出 bug。
             "[FC  ] 灯效模式 " + ((j.fcctl|0) !== 1 ? "不接管（一直亮）"
@@ -1651,6 +1699,8 @@ var fcCtlRow = $("fcCtlRow");
 if(fcCtlRow) fcCtlRow.addEventListener("click", toggleFcCtl);
 var gfixRow = $("gfixRow");
 if(gfixRow) gfixRow.addEventListener("click", toggleGfix);
+var tstRow = $("tstRow");
+if(tstRow) tstRow.addEventListener("click", toggleTst);
 
 /* ================= 设备页：日志开关 ================= */
 $("dbgRow").addEventListener("click", function(){

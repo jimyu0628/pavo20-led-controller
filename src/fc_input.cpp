@@ -109,6 +109,10 @@ static uint8_t           s_bits[3][FC_MAX_BITS];
 static volatile uint16_t s_nbits[3];
 static volatile uint8_t  s_wr = 0, s_pub = 0;
 static volatile bool     s_frameReady = false;
+// v32.38：上一帧的位流（只给「位差」统计用，1.5KB）。不可省成「比较相邻两块」——
+// 三缓冲里另外两块什么时候被覆盖是不确定的，只有自己留一份才准。
+static uint8_t           s_prevBits[FC_MAX_BITS];
+static uint16_t          s_prevCnt = 0;
 
 // 判别阈值（cycle）：v32.29 起只用于「帧尾那一位」（它的低电平是帧间复位，
 // 不能拿高低比）。仍然按两簇均值的中点自适应，日志里当健康指标看。
@@ -170,6 +174,7 @@ volatile uint32_t g_rxHaveMin = 0;   // v32.37：最近 100 帧「解出颗数�
 volatile uint32_t g_rxHaveMax = 0;   // v32.37：最近 100 帧「解出颗数」的最大值
                                      //   两者差 >3 就说明帧头丢位在抖 → 图案会左右挪
 volatile uint32_t g_rxGapMs = 0;     // v32.37：最近两帧之间的间隔（ms）
+volatile uint32_t g_rxBitDiff = 0;   // v32.38：与上一帧（帧尾对齐）不同的位数
 static uint32_t s_haveN = 0, s_haveMin = 0, s_haveMax = 0;  // v32.37：颗数波动窗口
 volatile uint16_t g_rxGapMaxNs = 0;  // v32.33：最近一帧最长的一位时长
 volatile uint16_t g_rxHiMinNs = 0;
@@ -266,6 +271,31 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
         }
     }
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
+
+    // ---------- v32.38：与上一帧的「位差」----------
+    // 【为什么要这个数】现场已经做到：帧长稳定 42~42、临界位 0、毛刺 0、残片 0，
+    //   可灯带上仍有「随机 1/3 颗稍暗」。这三类指标都只能证明「时序看着正常」，
+    //   证明不了「判出来的位和上一帧一样」。而纯色静止时飞控发的就是同一帧，
+    //   所以唯一可能的差别就是我们自己判反了某些位。
+    //   一位判反 = 某颗灯某个通道的一个 bit 翻掉：落在高位（128）就是「暗一半」，
+    //   落在低位是「几乎看不出来」。这正好对上现场症状，也能解释为什么
+    //   「临界位」是 0 —— 判反的那种位，高/低差距仍然很大，一点都不「临界」。
+    // 【怎么比】两帧帧头丢的位数不同（每帧 1~3 颗），所以只能**按帧尾对齐**：
+    //   比较两帧的最后 m 位，m = min(本帧位数, 上帧位数)。帧尾永远对齐，这是唯一可靠锚点。
+    {
+        uint16_t m = (cnt < s_prevCnt) ? cnt : s_prevCnt;
+        if (s_prevCnt > 0 && m > 0) {
+            const uint8_t* curB  = s_bits[s_wr];
+            const uint8_t* prevB = s_prevBits;
+            uint32_t d = 0;
+            for (uint16_t j = 0; j < m; j++) {
+                if (curB[cnt - 1 - j] != prevB[s_prevCnt - 1 - j]) d++;
+            }
+            g_rxBitDiff = d;
+        }
+        memcpy(s_prevBits, s_bits[s_wr], cnt);
+        s_prevCnt = cnt;
+    }
 
     // 发布（三缓冲交换）
     s_nbits[s_wr] = cnt;
@@ -547,6 +577,10 @@ void fcRxReset() {
     s_muteUntilCyc = 0;
     s_cal = 0;
     s_periodCyc = FC_PERIOD_NOM;
+    // v32.38：位差基准也作废。保留旧帧去比对「复位后的第一帧」没有意义，
+    // 只会凭空报出上千个位差，把现场判断带偏。
+    s_prevCnt = 0;
+    g_rxBitDiff = 0;
 }
 
 // ---------- 轮询：取完整帧 ----------

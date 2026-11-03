@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "esp_err.h"
+#include "esp_attr.h"     // v32.38：WORD_ALIGNED_ATTR（DMA 源地址要按字对齐）
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "driver/spi_master.h"
@@ -40,8 +41,12 @@ static spi_device_handle_t s_spi = NULL;
 // SPI 一次事务不能被两个任务同时用 —— 用互斥量排队。
 // 注意不能用 portENTER_CRITICAL：一次传输 1.35ms，关中断那么久会把一切都搞乱。
 static SemaphoreHandle_t s_txLock = NULL;
-// DMA 源缓冲：必须在内部 RAM（静态数组满足），传输期间不能被改写
-static uint8_t s_spiBuf[SPI_ALL_BYTES];
+// DMA 源缓冲：必须在内部 RAM（静态数组满足），传输期间不能被改写。
+// v32.38【必须 4 字节对齐】SPI 的 DMA 是按 32 位字搬运的，源地址不按字对齐时，
+// 头部那几个字节可能被多读/错位，线上波形就整体偏一段 —— 表现是首颗灯乱色，
+// 严重时整条错位。加 WORD_ALIGNED_ATTR 让编译器保证起始地址对齐。
+// 另一半在 showStrip 里：传输长度也要凑成 4 的整数倍（补 0 = 低电平，正好是复位段）。
+static WORD_ALIGNED_ATTR uint8_t s_spiBuf[SPI_ALL_BYTES + 4];
 static esp_err_t s_ledErr = ESP_OK; // 初始化失败错误码（延迟到 USB 就绪后打印）
 
 volatile uint32_t g_txCount = 0;   // 成功发送帧计数（心跳诊断）
@@ -125,6 +130,10 @@ void showStrip(const RGB* leds, int n) {
 
     if (s_txLock) xSemaphoreTake(s_txLock, portMAX_DELAY);
     int len = encodeStrip(leds, n, s_spiBuf);
+    // v32.38：把长度凑成 4 的整数倍。SPI 走 DMA 时按 32 位字搬运，
+    // 尾部的非整字部分曾出现过被多带/丢字节的情况；补的这几个字节是 0x00，
+    // 对 WS2812 来说就是继续拉低（复位段），对时序只有好处没有坏处。
+    while ((len & 3) != 0) s_spiBuf[len++] = 0x00;
 
     spi_transaction_t t = {};
     t.length = (size_t)len * 8;         // 单位是 bit

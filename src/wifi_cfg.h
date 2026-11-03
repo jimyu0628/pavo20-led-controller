@@ -70,6 +70,15 @@ int  webGetGlitchFix();
 int  webGetOutDiff();
 int  webGetOutIsol();
 void webSetGlitchFix(int v);
+// v32.38：把「变化」拆成三档 + 位差 + 冻结画面自检
+//   OutDiff=大幅变化(≥72)颗数（纯色静止时必须 0）· OutMicro=微差(1~71)颗数
+//   OutMax=本帧最大通道差（静止时应 ≤2）· RxBitDiff=与上一帧不同的位数（必须是 0）
+//   Test=1 表示正在「冻结画面原样重发」，用来把「解码」和「输出」一刀切开
+int  webGetOutMicro();
+int  webGetOutMax();
+int  webGetRxBitDiff();
+int  webGetTest();
+void webSetTest(int on);
 // v32.33：上次重启前执行到哪一步（崩溃落点）· 崩之前跑了多少秒
 //   靠 RTC 内存跨重启保存，专治「死机了但看不到任何现场」——
 //   配「复位原因」一起看：PANIC/看门狗 + 落点，就能缩到具体哪个函数。

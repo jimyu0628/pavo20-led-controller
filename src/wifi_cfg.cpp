@@ -160,6 +160,9 @@ static void sendState(httpd_req_t* req) {
              //   hvmin~hvmax 最近 100 帧解出颗数的波动范围（差 >3 = 帧头丢位在抖）
              //   gms 两帧间隔（正常 20~50ms；掉到 1~2ms 说明两帧被当成了一帧）
              "\"gfix\":%d,\"odif\":%d,\"oiso\":%d,"
+             // v32.38：变化分档 + 帧内位差 + 冻结自检
+             //   omic=微差颗数 / omax=本帧最大通道差 / bdif=与上一帧不同的位数 / tst=冻结自检
+             "\"omic\":%d,\"omax\":%d,\"bdif\":%d,\"tst\":%d,"
              "\"hvmin\":%u,\"hvmax\":%u,\"gms\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
@@ -187,6 +190,7 @@ static void sendState(httpd_req_t* req) {
              webGetLastStage(), webGetLastUp(),
              (unsigned)g_rxShort, (unsigned)g_rxOver, (unsigned)g_rxDrop,
              webGetGlitchFix(), webGetOutDiff(), webGetOutIsol(),
+             webGetOutMicro(), webGetOutMax(), webGetRxBitDiff(), webGetTest(),
              (unsigned)g_rxHaveMin, (unsigned)g_rxHaveMax, (unsigned)g_rxGapMs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -232,6 +236,7 @@ static esp_err_t handler_set(httpd_req_t* req) {
         if (httpd_query_key_value(q, "bleen",  v, sizeof(v)) == ESP_OK) webSetBleAdv(atoi(v)); // v32.32
         if (httpd_query_key_value(q, "fcctl",  v, sizeof(v)) == ESP_OK) webSetFcCtl(atoi(v));  // v32.36
         if (httpd_query_key_value(q, "gfix",   v, sizeof(v)) == ESP_OK) webSetGlitchFix(atoi(v)); // v32.37
+        if (httpd_query_key_value(q, "tst",    v, sizeof(v)) == ESP_OK) webSetTest(atoi(v));       // v32.38
     }
     webApplyNow(); // 立即生效（灭灯/渲染）
     sendState(req); // 回一整套最新状态，网页拿到就直接同步

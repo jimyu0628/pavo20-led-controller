@@ -185,7 +185,9 @@ static int s_gfix = 1;         // 1=开（默认），0=关；断电记忆
 static RGB     s_prevOut[STRIP_MAX_LEDS]; // 上一帧实际送出去的颜色
 static uint8_t s_gfixHold[STRIP_MAX_LEDS];
 static RGB     s_newOut[STRIP_MAX_LEDS];  // v32.37：本帧算出来的候选值（两遍处理用）
-volatile uint32_t g_outDiff = 0;  // 本帧与上一帧有多少颗不同（不管有没有被抑制）
+volatile uint32_t g_outDiff = 0;  // v32.38：本帧「大幅变化」(≥72) 的颗数
+volatile uint32_t g_outMicro = 0; // v32.38：本帧「微差」(1~71) 的颗数
+volatile uint32_t g_outMax = 0;   // v32.38：本帧最大通道差（0~255）
 volatile uint32_t g_outIsol = 0;  // 本帧被「孤立跳变」抑制掉的颗数
 static inline int colDist(const RGB& a, const RGB& b) {
     int d = (int)a.r - (int)b.r; if (d < 0) d = -d;
@@ -193,6 +195,17 @@ static inline int colDist(const RGB& a, const RGB& b) {
     int f = (int)a.b - (int)b.b; if (f < 0) f = -f; if (f > d) d = f;
     return d;
 }
+// ---------- v32.38【A/B 自检：冻结画面】----------
+// 现场到了这一步必须做一次「一刀切两半」的判定：
+//   症状是「基本全红，但随机 1/3 颗稍暗」。可能的通路只有两条 ——
+//     A. 解码：飞控发的同一帧，我们判出来的位不一样（→ 某通道某 bit 翻，高位翻就是暗一半）
+//     B. 输出：我们发出去的字节完全一样，但 WS2812 收错了（→ 电平/反射/供电/地弹）
+//   这个开关专门切 B：把「当前这一帧」冻住，之后**每分钟 750 次原样重发同一串字节**，
+//   期间完全不碰飞控、不碰灯效。此时若灯带还会随机变暗，那必然是 B（输出侧），
+//   固件再改也没用，得从硬件下手；若画面纹丝不动，嫌疑就回到 A，继续盯「帧内位差」。
+static bool     s_testOn = false;
+static uint32_t s_testMs = 0;
+static RGB      s_testBuf[STRIP_MAX_LEDS];   // 冻结下来的那一帧
 // 清屏 / 模式切换时把「上一帧」也清掉，免得抑制逻辑拿旧颜色当参考
 static void resetOutHistory() {
     for (int i = 0; i < STRIP_MAX_LEDS; i++) {
@@ -200,6 +213,8 @@ static void resetOutHistory() {
         s_gfixHold[i] = 0;
     }
     g_outDiff = 0;
+    g_outMicro = 0;
+    g_outMax = 0;
     g_outIsol = 0;
 }
 // 效果帧节奏
@@ -349,7 +364,11 @@ static void mapFcToStrip(const FcFrame& frame) {
     if (off > FC_PEAK_JUMP_MAX * 2) return;
 
     // ---------- 第一遍：算出这一帧「想显示」的颜色 ----------
-    int diffN = 0;
+    // v32.38：把「变了几颗」拆成三档。v32.37 只有一个 `变化 N 颗`，判据是
+    //   「最大通道差 ≠ 0」，结果纯色静止时永远显示 44~45 颗 —— 差值只有 1 也算变化，
+    //   于是这个数看着像「整条都在乱跳」，实际可能只是 1 LSB 的抖动，把自己吓了好几轮。
+    //   现在分开：大幅（≥72，肉眼可见的跳变）/ 微差（1~71，抖动或飞控自己微调）/ 最大差值。
+    int bigN = 0, microN = 0, maxD = 0;
     for (int i = 0; i < s_stripLen; i++) {
         int src = i / ratio;
         RGB c;
@@ -369,7 +388,11 @@ static void mapFcToStrip(const FcFrame& frame) {
             }
         }
         s_newOut[i] = c;
-        if (colDist(c, s_prevOut[i]) != 0) diffN++;
+        int d = colDist(c, s_prevOut[i]);
+        if (d > 0) {
+            if (d >= GFIX_BIG_DIFF) bigN++; else microN++;
+            if (d > maxD) maxD = d;
+        }
     }
 
     // ---------- 第二遍：孤立跳变抑制（v32.37） ----------
@@ -399,8 +422,10 @@ static void mapFcToStrip(const FcFrame& frame) {
         s_strip[i]    = c;
         s_prevOut[i]  = c;
     }
-    g_outDiff = (uint32_t)diffN;
-    g_outIsol = (uint32_t)isoN;
+    g_outDiff  = (uint32_t)bigN;     // v32.38：≥GFIX_BIG_DIFF 的「大幅变化」颗数
+    g_outMicro = (uint32_t)microN;   // v32.38：1~71 的「微差」颗数（抖动/飞控微调）
+    g_outMax   = (uint32_t)maxD;     // v32.38：本帧最大通道差
+    g_outIsol  = (uint32_t)isoN;
     refreshStrip();
 }
 // ---------- 标定模式 ----------
@@ -507,6 +532,28 @@ int webGetFcLive() { return ((nowMs() - s_fcLedOnMs) <= FC_SNIFF_HOLD_MS) ? 1 : 
 int  webGetGlitchFix() { return s_gfix; }
 int  webGetOutDiff()   { return (int)g_outDiff; }
 int  webGetOutIsol()   { return (int)g_outIsol; }
+// v32.38：把「变化」拆三档，"纯色静止时该是多少"才有判据：
+//   大幅 = ≥72（肉眼可见的跳变，纯色静止时必须为 0）
+//   微差 = 1~71（1 LSB 抖动、飞控自己的微调，几十颗也正常）
+//   最大 = 本帧最大通道差（真正该盯的是这个：静止时应 ≤2）
+int  webGetOutMicro()  { return (int)g_outMicro; }
+int  webGetOutMax()    { return (int)g_outMax; }
+int  webGetRxBitDiff() { return (int)g_rxBitDiff; }
+int  webGetTest()      { return s_testOn ? 1 : 0; }
+void webSetTest(int on) {
+    if (on && !s_testOn) {
+        // 冻结「现在屏幕上这一帧」：颜色、亮度、颗数都照原样，只固定重发
+        for (int i = 0; i < STRIP_MAX_LEDS; i++) s_testBuf[i] = (i < s_stripLen) ? s_strip[i] : RGB();
+        s_testMs = 0;
+        s_testOn = true;
+        logMsg("[自检] 冻结画面，原样重发（不碰飞控、不碰灯效）。"
+               "此时若灯还在随机变暗 = 输出侧问题（电平/反射/供电），与解码无关。\n");
+    } else if (!on && s_testOn) {
+        s_testOn = false;
+        s_lastFxMs = nowMs() - fxIntervalMs();   // 退出后立刻重画，别停一帧
+        logMsg("[自检] 已退出，恢复飞控/灯效显示。\n");
+    }
+}
 void webSetGlitchFix(int v) {
     int on = v ? 1 : 0;
     if (on == s_gfix) return;
@@ -778,6 +825,18 @@ extern "C" void app_main(void) {
             if (ev != BTN_NONE) handleButton(ev);
         }
         // 2) 飞控信号轮询
+        //    v32.38：自检优先。冻结画面期间完全绕开飞控采集与灯效渲染，
+        //    只按固定节奏把同一串字节重发 —— 这是「解码 vs 输出」的判决开关。
+        if (s_testOn) {
+            if ((uint32_t)(now - s_testMs) >= 80) {   // ≈12 帧/秒，与正常显示同节奏
+                s_testMs = now;
+                showStrip(s_testBuf, s_stripLen);
+            }
+            if (fcRxActive()) { fcRxSetActive(false); s_capWinMs = 0; }
+            s_sniffUntilMs = 0;
+            delayMs(5);
+            continue;
+        }
         //    v32.32：输出已经换成 SPI+DMA，DMA 搬运不依赖中断，采集那 1.3ms 的
         //    中断屏蔽不会再掐断灯带数据流（旧版 RMT 无 DMA，就是靠中断每 60µs
         //    续填 FIFO，一屏蔽就断流 → 频闪/残帧/通道卡死）。所以这里不再要求

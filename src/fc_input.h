@@ -88,6 +88,12 @@ extern volatile uint32_t g_rxGap;      // v32.33：最近一帧的「断流位�
 extern volatile uint32_t g_rxHaveMin;
 extern volatile uint32_t g_rxHaveMax;
 extern volatile uint32_t g_rxGapMs;
+// v32.38：与上一帧相比、按帧尾对齐后**不同的位数**。
+//   这是「解码到底稳不稳」唯一能自证的指标：飞控发同一帧（纯色静止）时它必须是 0。
+//   不是 0（哪怕只有 5~20 位）= ISR 把某些位判反了 —— 一位判反就是某颗灯某个通道
+//   的一个 bit 翻转，落在高位正好是「这颗灯暗一半」，就是现场「随机 1/3 灯稍暗」。
+//   若它恒为 0 而灯还在闪，问题在输出侧（ESP32→灯带的电气 / SPI·DMA），与解码无关。
+extern volatile uint32_t g_rxBitDiff;
 extern volatile uint16_t g_rxGapMaxNs; // v32.33：最近一帧最长的一位时长（正常 = 位周期）
 extern volatile uint16_t g_rxPeriodNs; // v32.29：实测位周期（ns）
 extern volatile uint16_t g_rxHiMinNs;  // 最短高位（ns）
