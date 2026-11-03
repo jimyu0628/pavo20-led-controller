@@ -192,6 +192,13 @@ volatile uint32_t g_outIsol = 0;  // 本帧被「孤立跳变」抑制掉的颗�
 // v32.39：位差统计的 5 秒窗口（日志每 5 秒读走并清零一次窗口）
 static volatile uint32_t s_bdifMax = 0;
 static volatile uint32_t s_bdifN   = 0;
+// v32.40【窗口里到底有没有样本 —— 上一版最坑的一个漏洞】
+//   现场日志：`飞控静默 89s` + `帧内位差 21 位` + `5s 峰值 0 · 差异帧 0` + `✓ 一帧都没判反`。
+//   看着像「解码完美」，其实那 89 秒一帧都没进来：峰值是 0 因为**没有样本**，
+//   21 位是 89 秒前最后一帧留下的旧值。用「0」去否定解码问题，逻辑上不成立。
+//   所以窗口必须带帧数：0 帧 = 这几个数全部作废，日志直接写「无新帧」。
+static volatile uint32_t s_bdifFrames = 0;
+static volatile uint32_t s_txchgWin = 0;   // v32.40：本窗口输出字节流变化次数
 static inline int colDist(const RGB& a, const RGB& b) {
     int d = (int)a.r - (int)b.r; if (d < 0) d = -d;
     int e = (int)a.g - (int)b.g; if (e < 0) e = -e; if (e > d) d = e;
@@ -557,9 +564,16 @@ int  webGetRxBitDiff() { return (int)g_rxBitDiff; }
 // 「刚好正常」的采样骗过去，v32.38 的 0 就是这么来的）
 int  webGetRxBitDiffMax() { return (int)s_bdifMax; }
 int  webGetRxBitDiffN()   { return (int)s_bdifN; }
+// v32.40：判决质量四件套
+int  webGetRxBitDiffRaw() { return (int)g_rxBitDiffRaw; }
+int  webGetRxAmbig()      { return (int)g_rxAmbig; }
+int  webGetRxHeld()       { return (int)g_rxHeld; }
+int  webGetRxSep()        { return (int)g_rxSepNs; }
+int  webGetRxCluster()    { return (int)g_rxCluster; }
+int  webGetBdWindowFrames() { return (int)s_bdifFrames; }
 // v32.39：输出侧自证 —— 交给 DMA 的字节流校验和 / 与上一帧不同的次数
 unsigned webGetTxSum()    { return (unsigned)g_txSum; }
-int  webGetTxSumChg()     { return (int)g_txSumChg; }
+int  webGetTxSumChg()     { return (int)s_txchgWin; }   // v32.40：本窗口，不是累计
 int  webGetTxRepeat()     { return ledTxRepeat(); }
 int  webGetTxResetUs()    { return ledTxResetUs(); }
 int  webGetTest()      { return s_testOn ? 1 : 0; }
@@ -776,6 +790,7 @@ extern "C" void app_main(void) {
     uint32_t lastBtnPoll = 0;
     uint32_t lastHbMs = 0;
     uint32_t lastRxLogMs = 0;
+    uint32_t lastFrameEndN = 0;   // v32.40：上一次 5s 日志时的「收完整帧」计数
     uint32_t lastFrames = 0;   // v32.35：上一次已发布帧计数（判「飞控还在不在」）
     uint32_t lastFragN = 0, lastFrameN = 0;   // v32.35：碎片风暴检测
     uint32_t lastTxTotal = 0;
@@ -847,9 +862,19 @@ extern "C" void app_main(void) {
                 lastRxLogMs = now;
                 // v32.39：先把这个窗口的位差峰值取走再清零 —— 峰值才是证据，
                 // 瞬时值只能证明「这一刻刚好没判反」。
+                // v32.40：同时数一下本窗口到底解出过几帧。0 帧 = 这些数全是旧值。
                 s_bdifMax = g_rxBitDiffMax;
                 s_bdifN   = g_rxBitDiffN;
+                {
+                    uint32_t fe = (uint32_t)g_rxFrameEnd;
+                    s_bdifFrames = fe - lastFrameEndN;
+                    lastFrameEndN = fe;
+                }
                 fcRxBitDiffPeakClear();
+                // 输出侧校验和的变化次数也按窗口统计（上一版是累计值，标成「5s 内变 N 次」，
+                // 现场出现「12 次/秒的发送、5 秒变 1361 次」这种自相矛盾的数，就是这个错）
+                s_txchgWin = (uint32_t)g_txSumChg;
+                g_txSumChg = 0;
                 char head[48];
                 fcRxHeadHex(head, sizeof(head));
                 logMsg("[RX] ok=%d err=0x%x frames=%u bits=%u mis=%u spike=%u merge=%u near=%u | hi=%u..%u lo=%u per=%u thr=%u ns | frag=%u ghost=%u cap=%uus ord=%s head=%s\n",
@@ -863,6 +888,13 @@ extern "C" void app_main(void) {
                        (uint32_t)g_rxFrag, (uint32_t)g_rxGhost,
                        (unsigned)g_rxCapUs,
                        fcRxOrderName(), head);
+                // v32.40：判决质量单独一行（USB 串口用；网页上也是同一套数）
+                logMsg("[RX] thr=%uns sep=%uns(%s) amb=%u held=%u bdraw=%u bdif=%u win=%u\n",
+                       (unsigned)g_rxThrNs, (unsigned)g_rxSepNs,
+                       g_rxCluster ? "分得开" : "重叠",
+                       (unsigned)g_rxAmbig, (unsigned)g_rxHeld,
+                       (unsigned)g_rxBitDiffRaw, (unsigned)g_rxBitDiff,
+                       (unsigned)s_bdifFrames);
             }
             lastTxTotal = cur;
             lastUrx = urx; lastUtx = utx;

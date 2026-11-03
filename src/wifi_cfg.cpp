@@ -167,6 +167,12 @@ static void sendState(httpd_req_t* req) {
              //   txsum = 交给 DMA 的字节流校验和，txchg = 与上一帧不同的次数（静止时必须 0）；
              //   ramp = 灰阶自检，rep/rus = 每帧连发遍数 / 帧内复位时长
              "\"bdmax\":%d,\"bdn\":%d,\"txsum\":%u,\"txchg\":%u,\"ramp\":%d,\"rep\":%d,\"rus\":%d,"
+             // v32.40：判决质量四件套
+             //   bdraw = 沿用上一帧之前的原始位差（判得有多烂）
+             //   amb   = 落在临界带（离阈值 ±31ns）的位数 / held = 其中被改用上一帧的位数
+             //   sep   = 本帧 0/1 两簇之间空隙的宽度（ns），clu = 1 表示分得开、0 表示重叠
+             //   bdwf  = 本窗口真正解出过多少帧（=0 时上面那些位差/变化数字全是旧值，不作判据）
+             "\"bdraw\":%d,\"amb\":%d,\"held\":%d,\"sep\":%d,\"clu\":%d,\"bdwf\":%d,"
              "\"hvmin\":%u,\"hvmax\":%u,\"gms\":%u}",
              webGetMode(), webGetColor(), webGetSpeed(), webGetBright(),
              webGetCalib(), STRIP_MAX_LEDS,
@@ -198,6 +204,8 @@ static void sendState(httpd_req_t* req) {
              webGetRxBitDiffMax(), webGetRxBitDiffN(),
              webGetTxSum(), webGetTxSumChg(), webGetRamp(),
              webGetTxRepeat(), webGetTxResetUs(),
+             webGetRxBitDiffRaw(), webGetRxAmbig(), webGetRxHeld(),
+             webGetRxSep(), webGetRxCluster(), webGetBdWindowFrames(),
              (unsigned)g_rxHaveMin, (unsigned)g_rxHaveMax, (unsigned)g_rxGapMs);
     httpd_resp_set_hdr(req, "Content-Type", "application/json; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

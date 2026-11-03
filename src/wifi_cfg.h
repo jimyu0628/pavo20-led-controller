@@ -87,6 +87,18 @@ void webSetTest(int on);
 //   不同的次数（画面静止时必须恒 0）。两者都 0 而灯还在变 → 只可能是灯珠侧硬件。
 int  webGetRxBitDiffMax();
 int  webGetRxBitDiffN();
+// v32.40：判决质量四件套（治「随机 1/3 颗稍暗」的那组数）
+//   RxBitDiffRaw = 沿用上一帧**之前**的原始位差 —— 说明判得有多烂
+//   RxAmbig      = 本帧落在临界带（离阈值 ±31ns）的位数
+//   RxHeld       = 其中被改用「上一帧的位」的位数（这些位原本会随机翻 → 灯忽明忽暗）
+//   RxSep        = 本帧 0/1 两簇之间空隙的宽度（ns）；Cluster=1 分得开、0 重叠
+int  webGetRxBitDiffRaw();
+int  webGetRxAmbig();
+int  webGetRxHeld();
+int  webGetRxSep();
+int  webGetRxCluster();
+// 本 5 秒窗口里真正解出过多少帧。为 0 时上面所有「位差/变化」都是旧值，不能当判据。
+int  webGetBdWindowFrames();
 unsigned webGetTxSum();
 int  webGetTxSumChg();
 int  webGetTxRepeat();   // 每帧连发几遍（v32.39 默认 2）

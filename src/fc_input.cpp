@@ -113,6 +113,26 @@ static volatile bool     s_frameReady = false;
 // 三缓冲里另外两块什么时候被覆盖是不确定的，只有自己留一份才准。
 static uint8_t           s_prevBits[FC_MAX_BITS];
 static uint16_t          s_prevCnt = 0;
+// ---------- v32.40：判决用的两件新东西 ----------
+// ① 高位直方图：8 cycle（50ns）一格，覆盖 0~6400ns。
+//   为什么要它：阈值必须落在两簇之间的**空隙**里。旧代码取两簇均值的中点，
+//   可这台飞控 0 码高位低到 218、1 码高到 543，均值中点算出来 375 恰好压在
+//   0 码的上沿（0 码最高约 370）—— 判决线贴着簇沿，那片位每帧随机翻，
+//   现场 21 位位差就是这么来的。直方图能直接看见空隙在哪，阈值放进空隙中心。
+// ② 临界带位图：离阈值 ±FC_AMB_CYC 以内的位标出来，帧尾对齐后沿用上一帧。
+#define FC_HIST_BINS   128
+#define FC_HIST_SHIFT  3          // 8 cycle / 格 = 50ns
+#define FC_AMB_CYC     5          // ±5 cycle ≈ ±31ns
+#define FC_AMB_BYTES   ((FC_MAX_BITS + 7) / 8)
+static uint16_t          s_hist[FC_HIST_BINS];
+static uint8_t           s_amb[3][FC_AMB_BYTES];
+static volatile uint16_t s_ambN = 0;      // 本帧带内位数（ISR 填）
+
+volatile uint32_t g_rxBitDiffRaw = 0;
+volatile uint32_t g_rxAmbig = 0;
+volatile uint32_t g_rxHeld = 0;
+volatile uint16_t g_rxSepNs = 0;
+volatile uint8_t  g_rxCluster = 0;
 
 // 判别阈值（cycle）：v32.29 起只用于「帧尾那一位」（它的低电平是帧间复位，
 // 不能拿高低比）。仍然按两簇均值的中点自适应，日志里当健康指标看。
@@ -260,21 +280,59 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
         }
     }
 
-    // 判别阈值：两簇（0 码高位均值 / 1 码高位均值）的中点
-    if (s_h0N >= 8 && s_h1N >= 8) {
-        uint32_t a0 = s_h0Sum / s_h0N;
-        uint32_t a1 = s_h1Sum / s_h1N;
-        if (a1 > a0 + a0 / 3u) {
-            uint32_t t = (a0 + a1) / 2u;
-            if (t < 24) t = 24;
+    // ---------- v32.40：判别阈值 = 本帧高位直方图「最大空隙」的中心 ----------
+    // 旧做法（v32.29~v32.39）取两簇**均值**的中点，看起来合理，实际吃过一次大亏：
+    //   现场 0 码高位 218~370（均值被少数低位拖到 ~280）、1 码高位 470~543（均值 ~500）
+    //   → 中点 390，再经 3:1 平滑落到 375。而 0 码最高能到 370 —— 判决线离 0 码
+    //   上沿只有 5ns，那一片位每帧随机翻，日志里就是「位差 21 位」。
+    //   **均值中点会被簇的宽度骗**：哪一簇更宽，中点就被拽向它。
+    // 直方图空隙法直接量「两簇之间哪儿是空的」，把阈值放进空隙正中，
+    // 两边各留一半余量。同时把空隙宽度报出去（g_rxSepNs）——
+    // 空隙塌到 1 格（50ns）以下就是「信号本身已经到极限」，那时只能靠 B（临界带保持）。
+    {
+        int b0 = -1, b1 = -1;
+        for (int i = 0; i < FC_HIST_BINS; i++) {
+            if (s_hist[i]) { if (b0 < 0) b0 = i; b1 = i; }
+        }
+        int runStart = -1, bestStart = -1, bestLen = 0;
+        for (int i = b0; b0 >= 0 && i <= b1; i++) {
+            if (s_hist[i] == 0) {
+                if (runStart < 0) runStart = i;
+            } else if (runStart >= 0) {
+                int len = i - runStart;
+                if (len > bestLen) { bestLen = len; bestStart = runStart; }
+                runStart = -1;
+            }
+        }
+        // 两侧都得有足够的位，否则那只是某一簇尾巴上的空洞，不是真空隙
+        int lN = 0, rN = 0;
+        if (bestLen > 0) {
+            for (int i = b0; i < bestStart; i++) lN += s_hist[i];
+            for (int i = bestStart + bestLen; i <= b1; i++) rN += s_hist[i];
+        }
+        if (bestLen > 0 && lN >= 16 && rN >= 16) {
+            // 用「格中心」而不是「格边界」：空隙两侧各占半格，各加 4 cycle（25ns）
+            const uint32_t HC = 1u << (FC_HIST_SHIFT - 1);
+            uint32_t lo = ((uint32_t)(bestStart - 1) << FC_HIST_SHIFT) + HC;          // 空隙左簇沿
+            uint32_t hi = ((uint32_t)(bestStart + bestLen) << FC_HIST_SHIFT) + HC;    // 空隙右簇沿
+            uint32_t t  = (lo + hi) / 2u;
+            if (t < 24)  t = 24;
             if (t > 300) t = 300;
-            s_thrCyc = s_cal ? ((s_thrCyc * 3 + t) / 4) : t;
-            s_cal = 1;
+            // 已经校准过就只做 1/4 跟随：空隙中心本身很稳，平滑只是为了别被单帧抖一下带走
+            s_thrCyc    = s_cal ? ((s_thrCyc * 3u + t) / 4u) : t;
+            s_cal       = 1;
+            // 空隙的「上界」宽度 = (空段格数 + 两侧各半格) —— 报得保守一点，
+            // 免得把 1 格空隙（真实 50~150ns）说成「两簇分得很开」。
+            g_rxSepNs   = (uint16_t)CYC_TO_NS((uint32_t)(bestLen + 1) << FC_HIST_SHIFT);
+            g_rxCluster = (bestLen >= 2) ? 1 : 0;   // 空隙上界 ≥150ns 才算分得开
+        } else if (b0 < 0) {
+            // 一位都没收到（不该发生，cnt≥24 才进来）：清校准，等下一帧
+            s_cal = 0; g_rxSepNs = 0; g_rxCluster = 0;
         } else {
-            // v32.33：两簇分不开 = 本帧判得很乱（阈值已经不可信）。
-            // 直接作废校准，下一帧退回「高 vs 低」重新学一遍 —— 闭环自纠，
-            // 免得一个偏掉的阈值把后续所有帧都带歪（全亮 / 全暗那种）。
-            s_cal = 0;
+            // 只有一簇（整帧同色 / 全灭）：没有可信空隙，保持现有阈值不动，
+            // 只把「没量到空隙」这件事报出去。
+            g_rxSepNs = 0;
+            g_rxCluster = 0;
         }
     }
     g_rxThrNs = (uint16_t)CYC_TO_NS(s_thrCyc);
@@ -290,19 +348,42 @@ static inline void IRAM_ATTR fcEndFrame(uint16_t cnt, uint32_t t0,
     // 【怎么比】两帧帧头丢的位数不同（每帧 1~3 颗），所以只能**按帧尾对齐**：
     //   比较两帧的最后 m 位，m = min(本帧位数, 上帧位数)。帧尾永远对齐，这是唯一可靠锚点。
     {
+        uint8_t* curB = s_bits[s_wr];
+        uint8_t* amb  = s_amb[s_wr];
         uint16_t m = (cnt < s_prevCnt) ? cnt : s_prevCnt;
+        uint32_t raw = 0, eff = 0, held = 0;
         if (s_prevCnt > 0 && m > 0) {
-            const uint8_t* curB  = s_bits[s_wr];
             const uint8_t* prevB = s_prevBits;
-            uint32_t d = 0;
+            // ① 原始位差：先把「本来判成什么样」如实记下来
             for (uint16_t j = 0; j < m; j++) {
-                if (curB[cnt - 1 - j] != prevB[s_prevCnt - 1 - j]) d++;
+                if (curB[cnt - 1 - j] != prevB[s_prevCnt - 1 - j]) raw++;
             }
-            g_rxBitDiff = d;
-            if (d > g_rxBitDiffMax) g_rxBitDiffMax = d;
-            if (d > 0) g_rxBitDiffN = (uint32_t)(g_rxBitDiffN + 1);
+            // ② v32.40：临界带内的位，按帧尾对齐沿用上一帧
+            //    为什么这一步能治「随机 1/3 颗稍暗」：那些位的真值没变，只是每帧
+            //    在判决线上随机落一边。沿用上一帧 = 把它钉住，画面立刻恒定。
+            //    为什么不会把「真的变色」拖慢：真值一变，高位立刻跳到另一簇、
+            //    离开带子，下一帧照实更新，零延迟 —— 带子只覆盖 ±31ns 这一小段。
+            for (uint16_t j = 0; j < m; j++) {
+                uint16_t ci = (uint16_t)(cnt - 1 - j);
+                if (amb[ci >> 3] & (uint8_t)(1u << (ci & 7))) {
+                    uint8_t pv = prevB[s_prevCnt - 1 - j];
+                    if (curB[ci] != pv) { curB[ci] = pv; held++; }
+                }
+            }
+            // ③ 生效位差：这才是真正送进颜色映射的东西（应恒为 0）
+            for (uint16_t j = 0; j < m; j++) {
+                if (curB[cnt - 1 - j] != prevB[s_prevCnt - 1 - j]) eff++;
+            }
+            g_rxBitDiff = eff;
+            if (eff > g_rxBitDiffMax) g_rxBitDiffMax = eff;
+            if (eff > 0) g_rxBitDiffN = (uint32_t)(g_rxBitDiffN + 1);
+        } else {
+            g_rxBitDiff = 0;   // 第一帧没有基准，不报位差（否则会凭空报上千位）
         }
-        memcpy(s_prevBits, s_bits[s_wr], cnt);
+        g_rxBitDiffRaw = raw;
+        g_rxHeld  = held;
+        g_rxAmbig = s_ambN;
+        memcpy(s_prevBits, curB, cnt);
         s_prevCnt = cnt;
     }
 
@@ -385,6 +466,11 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
     // 复位本帧统计
     uint8_t* bp = s_bits[s_wr];
     uint16_t cnt = 0;
+    // v32.40：本帧直方图（256B）与临界带位图（192B）清零。20Hz 下这点 memset
+    // 完全可以忽略，而它换来的是「阈值落在真空隙里」这件事每帧都重新量一遍。
+    memset(s_hist, 0, sizeof(s_hist));
+    memset(s_amb[s_wr], 0, FC_AMB_BYTES);
+    s_ambN = 0;
     s_fHiMin = 0xFFFFFFFFu;
     s_fHiMax = 0;
     s_fLoMax = 0;
@@ -478,7 +564,21 @@ static void IRAM_ATTR fcRiseIsr(void* arg) {
                     if (byDuty != byThr) nNear++;   // 两判据打架 = 真临界位
                 }
             }
-            if (cnt < FC_MAX_BITS) bp[cnt] = (uint8_t)one;
+            if (cnt < FC_MAX_BITS) {
+                bp[cnt] = (uint8_t)one;
+                // v32.40：① 高位直方图（帧尾算空隙/阈值用）
+                //         ② 临界带标记（帧尾沿用上一帧用）
+                uint32_t hb = h >> FC_HIST_SHIFT;
+                if (hb < FC_HIST_BINS) s_hist[hb]++;
+                if (s_cal) {
+                    int32_t dd = (int32_t)h - (int32_t)s_thrCyc;
+                    if (dd < 0) dd = -dd;
+                    if (dd <= FC_AMB_CYC) {
+                        s_amb[s_wr][cnt >> 3] |= (uint8_t)(1u << (cnt & 7));
+                        s_ambN++;
+                    }
+                }
+            }
             cnt++;
             if (h > s_fHiMax) s_fHiMax = h;
             if (h < s_fHiMin) s_fHiMin = h;
@@ -590,6 +690,9 @@ void fcRxReset() {
     // 只会凭空报出上千个位差，把现场判断带偏。
     s_prevCnt = 0;
     g_rxBitDiff = 0;
+    g_rxBitDiffRaw = 0;   // v32.40
+    g_rxHeld = 0;
+    g_rxAmbig = 0;
 }
 
 // ---------- 轮询：取完整帧 ----------
