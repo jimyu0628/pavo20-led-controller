@@ -567,7 +567,7 @@ int  webGetRamp()      { return s_rampOn ? 1 : 0; }
 // v32.39：两个自检互斥 —— 同时开着会互相覆盖，谁也看不出结果
 void webSetRamp(int on) {
     if (on && !s_rampOn) {
-        int n = (s_stripLen > 1) ? s_stripLen : 1;
+        int n = (s_stripLen > 1) ? s_stripLen : 2;   // <2 颗时按 2 算，别除零
         for (int i = 0; i < STRIP_MAX_LEDS; i++) {
             int lv = (i < n) ? (i * 255 / (n - 1)) : 0;
             s_rampBuf[i] = RGB((uint8_t)lv, 0, 0);   // 只点红通道，电流可控
